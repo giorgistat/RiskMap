@@ -23,7 +23,9 @@ dast(
   return_samples = TRUE,
   messages = TRUE,
   start_pars = list(beta = NULL, sigma2 = NULL, tau2 = NULL, phi = NULL, psi = NULL,
-    sigma2_re = NULL, gamma = NULL, alpha = NULL)
+    sigma2_re = NULL, gamma = NULL, alpha = NULL),
+  alpha_start = 0.5,
+  gamma_start = 2.5
 )
 }
 \arguments{

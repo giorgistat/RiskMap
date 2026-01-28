@@ -723,6 +723,36 @@ pred_target_grid <- function(object,
     }
   }
 
+  list_mode <- is.list(object$grid_pred) & !(inherits(object$grid_pred, "sfc") |
+                                               inherits(object$grid_pred, "sf"))
+
+  if (list_mode) {
+    n_pred <- vapply(object$grid_pred, function(g) nrow(sf::st_coordinates(g)), integer(1))
+
+    if (dast_model && include_mda_effect) {
+      if (is.null(mda_grid)) {
+        stop("With DAST and include_mda_effect = TRUE, 'mda_grid' must be provided (as a list matching 'object$grid_pred').")
+      }
+      if (!is.list(mda_grid)) {
+        stop("When 'object$grid_pred' is a list, 'mda_grid' must also be a list (one element per group).")
+      }
+      if (length(mda_grid) != length(object$grid_pred)) {
+        stop("Length of 'mda_grid' must match length of 'object$grid_pred'.")
+      }
+      for (i in seq_along(mda_grid)) {
+        if (!is.matrix(mda_grid[[i]]) && !is.data.frame(mda_grid[[i]])) {
+          stop(sprintf("'mda_grid[[%d]]' must be a matrix or data.frame.", i))
+        }
+        if (nrow(mda_grid[[i]]) != n_pred[i]) {
+          stop(sprintf("Rows of 'mda_grid[[%d]]' (%d) must equal number of locations in 'object$grid_pred[[%d]]' (%d).",
+                       i, nrow(mda_grid[[i]]), i, n_pred[i]))
+        }
+      }
+    }
+  } else {
+    n_pred <- nrow(object$S_samples)
+  }
+
 
   if(is.null(object$par_hat$tau2) &
      include_nugget) {
@@ -740,8 +770,11 @@ pred_target_grid <- function(object,
 
   n_summaries <- length(pd_summary)
   n_f <- length(f_target)
-  n_samples <- ncol(object$S_samples)
-  n_pred <- nrow(object$S_samples)
+  if (list_mode) {
+    n_samples <- ncol(object$S_samples[[1]])
+  } else {
+    n_samples <- ncol(object$S_samples)
+  }
 
   n_re <- length(object$re$samples)
   re_names <- names(object$re$samples)
@@ -760,7 +793,11 @@ pred_target_grid <- function(object,
   }
 
   if(!include_covariates) {
-    mu_target <- 0
+    if (list_mode) {
+      mu_target <- lapply(n_pred, function(n) rep(0, n))
+    } else {
+      mu_target <- 0
+    }
   } else {
 
     if(is.null(object$mu_pred)) stop("the output obtained from 'pred_S' does not
@@ -771,7 +808,11 @@ pred_target_grid <- function(object,
   }
 
   if(!include_cov_offset) {
-    cov_offset <- 0
+    if (list_mode) {
+      cov_offset <- lapply(n_pred, function(n) rep(0, n))
+    } else {
+      cov_offset <- 0
+    }
   } else {
     if(length(object$cov_offset)==1) {
       stop("No covariate offset was included in the model;
@@ -782,27 +823,60 @@ pred_target_grid <- function(object,
   }
 
   if(include_nugget) {
-    Z_sim <- matrix(rnorm(n_samples*n_pred,
-                          sd = sqrt(object$par_hat$tau2)),
-                    ncol = n_samples)
-    object$S_samples <- object$S_samples+Z_sim
+    if (list_mode) {
+      object$S_samples <- lapply(seq_along(object$S_samples), function(i) {
+        Z_sim <- matrix(rnorm(n_samples * n_pred[i], sd = sqrt(object$par_hat$tau2)),
+                        ncol = n_samples)
+        object$S_samples[[i]] + Z_sim
+      })
+    } else {
+      Z_sim <- matrix(rnorm(n_samples * n_pred,
+                            sd = sqrt(object$par_hat$tau2)),
+                      ncol = n_samples)
+      object$S_samples <- object$S_samples + Z_sim
+    }
   }
 
-  if(object$obs_loc) {
-    ID_coords <- object$ID_coords
+  if (list_mode) {
+    object$S_samples <- lapply(object$S_samples, function(x) {
+      if (is.numeric(x) && is.vector(x)) {
+        matrix(x, nrow = 1)
+      } else {
+        x
+      }
+    })
+
+    out$lp_samples <- vector("list", length(object$grid_pred))
+    for (i in seq_along(object$grid_pred)) {
+      if (is.matrix(mu_target[[i]])) {
+        out$lp_samples[[i]] <- sapply(1:n_samples,
+                                      function(j)
+                                        mu_target[[i]][, j] + cov_offset[[i]] +
+                                        object$S_samples[[i]][, j])
+      } else {
+        out$lp_samples[[i]] <- sapply(1:n_samples,
+                                      function(j)
+                                        mu_target[[i]] + cov_offset[[i]] +
+                                        object$S_samples[[i]][, j])
+      }
+    }
   } else {
-    ID_coords <- 1:n_pred
-  }
-  if(is.matrix(mu_target)) {
-    out$lp_samples <- sapply(1:n_samples,
-                             function(i)
-                               mu_target[,i] + cov_offset +
-                               object$S_samples[ID_coords,i])
-  } else {
-    out$lp_samples <- sapply(1:n_samples,
-                             function(i)
-                               mu_target + cov_offset +
-                               object$S_samples[ID_coords,i])
+    if(object$obs_loc) {
+      ID_coords <- object$ID_coords
+    } else {
+      ID_coords <- 1:n_pred
+    }
+    if(is.matrix(mu_target)) {
+      out$lp_samples <- sapply(1:n_samples,
+                               function(i)
+                                 mu_target[,i] + cov_offset +
+                                 object$S_samples[ID_coords,i])
+    } else {
+      out$lp_samples <- sapply(1:n_samples,
+                               function(i)
+                                 mu_target + cov_offset +
+                                 object$S_samples[ID_coords,i])
+    }
   }
 
 
@@ -827,24 +901,55 @@ pred_target_grid <- function(object,
 
   out$target <- list()
 
-  for(i in 1:n_f) {
-    target_samples_i <-
-      f_target[[i]](out$lp_samples)
-    if(dast_model && include_mda_effect) {
-      alpha <- object$par_hat$alpha
-      if(is.null(alpha)) alpha <- object$fix_alpha
-      gamma <- object$par_hat$gamma
-      mda_effect_time_pred <- compute_mda_effect(rep(time_pred, n_pred),
-                                                 mda_times = object$mda_times,
-                              mda_grid, alpha = alpha,
-                              gamma = gamma, kappa = object$power_val)
-      target_samples_i <- target_samples_i*mda_effect_time_pred[ID_coords]
-
+  if (list_mode) {
+    group_names <- names(object$grid_pred)
+    if (is.null(group_names)) {
+      group_names <- paste0("group_", seq_along(object$grid_pred))
     }
-    out$target[[paste(names_f[i])]] <- list()
-    for(j in 1:n_summaries) {
-      out$target[[paste(names_f[i])]][[paste(names_s[j])]] <-
-        apply(target_samples_i, 1, pd_summary[[j]])
+
+    for (i in seq_along(object$grid_pred)) {
+      out$target[[group_names[i]]] <- list()
+      for (k in 1:n_f) {
+        target_samples_i <- f_target[[k]](out$lp_samples[[i]])
+        if(dast_model && include_mda_effect) {
+          alpha <- object$par_hat$alpha
+          if(is.null(alpha)) alpha <- object$fix_alpha
+          gamma <- object$par_hat$gamma
+          mda_effect_time_pred <- compute_mda_effect(rep(time_pred, n_pred[i]),
+                                                     mda_times = object$mda_times,
+                                                     intervention = mda_grid[[i]],
+                                                     alpha = alpha,
+                                                     gamma = gamma,
+                                                     kappa = object$power_val)
+          target_samples_i <- target_samples_i * mda_effect_time_pred
+        }
+        out$target[[group_names[i]]][[paste(names_f[k])]] <- list()
+        for (j in 1:n_summaries) {
+          out$target[[group_names[i]]][[paste(names_f[k])]][[paste(names_s[j])]] <-
+            apply(target_samples_i, 1, pd_summary[[j]])
+        }
+      }
+    }
+  } else {
+    for(i in 1:n_f) {
+      target_samples_i <-
+        f_target[[i]](out$lp_samples)
+      if(dast_model && include_mda_effect) {
+        alpha <- object$par_hat$alpha
+        if(is.null(alpha)) alpha <- object$fix_alpha
+        gamma <- object$par_hat$gamma
+        mda_effect_time_pred <- compute_mda_effect(rep(time_pred, n_pred),
+                                                   mda_times = object$mda_times,
+                                                   mda_grid, alpha = alpha,
+                                                   gamma = gamma, kappa = object$power_val)
+        target_samples_i <- target_samples_i*mda_effect_time_pred[ID_coords]
+
+      }
+      out$target[[paste(names_f[i])]] <- list()
+      for(j in 1:n_summaries) {
+        out$target[[paste(names_f[i])]][[paste(names_s[j])]] <-
+          apply(target_samples_i, 1, pd_summary[[j]])
+      }
     }
   }
   out$grid_pred <- object$grid_pred
@@ -2689,4 +2794,3 @@ print.summary.RiskMap.sim.res <- function(x, ...) {
 
   invisible(x)
 }
-
