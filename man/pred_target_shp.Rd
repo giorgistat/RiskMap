@@ -60,17 +60,31 @@ defined by \code{pd_summary} (default \code{TRUE}).}
 \item{mda_grid}{Optional structure describing MDA schedules aligned with prediction grid cells
 (e.g., a \code{data.frame}/matrix/list). Used only when \code{include_mda_effect = TRUE}.}
 
-\item{pd_summary}{List of summary functions (e.g., mean, sd) to summarize target samples.}
+\item{include_re}{Logical; include unstructured random effects (RE) in the linear predictor (default \code{FALSE}).}
 
-\item{return_target_samples}{Logical indicating whether to return raw samples of the predictive targets for each region (default is FALSE).}
+\item{f_target}{List of target functions applied to linear predictor samples (e.g.,
+\code{list(prev = plogis)} for prevalence on the probability scale). If \code{NULL},
+the identity is used.}
+
+\item{pd_summary}{Named list of summary functions applied to each region's target samples
+(e.g., \code{list(mean = mean, sd = sd, q025 = function(x) quantile(x, 0.025), q975 = function(x) quantile(x, 0.975))}).
+Names are used as column suffixes in the outputs.}
+
+\item{messages}{Logical; if \code{TRUE}, print progress messages while computing regional targets.}
+
+\item{return_target_samples}{Logical; if \code{TRUE}, also return the raw target samples per region
+(default \code{FALSE}).}
 }
 \value{
-An object of class 'RiskMap_pred_target_shp' containing:
+An object of class \code{RiskMap_pred_target_shp} with components:
 \itemize{
-  \item \code{target} – summaries of predictive targets by region.
-  \item \code{target_samples} – raw samples of predictive targets (if \code{return_target_samples=TRUE}).
-  \item \code{shp} – spatial object with appended summary statistics.
-  \item \code{f_target}, \code{pd_summary}, \code{grid_pred}.
+  \item \code{target}: \code{data.frame} of region-level summaries (one row per region).
+  \item \code{target_samples}: (optional) \code{list} with one element per region; each contains
+        a \code{data.frame}/matrix of raw samples for each named target in \code{f_target},
+        if \code{return_target_samples = TRUE}.
+  \item \code{shp}: (optional) the input \code{sf} object with appended summary columns,
+        included if \code{return_shp = TRUE}.
+  \item \code{f_target}, \code{pd_summary}, \code{grid_pred}: inputs echoed for reproducibility.
 }
 }
 \description{

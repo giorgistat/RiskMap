@@ -28,7 +28,7 @@ pred_target_grid(
 
 \item{include_mda_effect}{Logical. Include the MDA effect in the predictive target using a DAST model; see \code{\link{dast}}.}
 
-\item{mda_grid}{Optional. Grid of MDA coverage values required for predictions using a DAST model; see \code{\link{dast}}. When \code{object$grid_pred} is a list, supply a list of matrices/data.frames, one per grid element, each with matching row counts.}
+\item{mda_grid}{Optional. Grid of MDA coverage values required for predictions using a DAST model; see \code{\link{dast}}.}
 
 \item{time_pred}{Optional. Time point for prediction required for predictions using a DAST model; see \code{\link{dast}}.}
 
@@ -40,10 +40,7 @@ pred_target_grid(
 }
 \value{
 An object of class 'RiskMap_pred_target_grid' containing predicted values
-        and summaries over the regular spatial grid. When \code{object$grid_pred}
-        is a list, \code{grid_pred} is returned as the original list and
-        \code{target} is a list with one element per grid group, each containing
-        the named targets and summaries.
+        and summaries over the regular spatial grid.
 }
 \description{
 Computes predictions over a regular spatial grid using outputs from the
