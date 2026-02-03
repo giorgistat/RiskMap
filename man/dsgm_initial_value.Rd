@@ -29,5 +29,7 @@ Computes starting values for joint prevalence-intensity model
 
 Computes starting values for joint prevalence-intensity model
   by fitting simplified model without spatial random effects
+
+Fits simplified model without spatial effects to get starting values
 }
 \keyword{internal}

@@ -1,0 +1,50 @@
+CXX_STD = CXX17
+
+# =============================================================================
+# TMB Configuration
+# =============================================================================
+
+TMB_INC = $(shell echo 'cat(system.file("include", package="TMB"))' | "${R_HOME}/bin/R" --slave --vanilla)
+RCPPEIGEN_INC = $(shell echo 'cat(system.file("include", package="RcppEigen"))' | "${R_HOME}/bin/R" --slave --vanilla)
+
+# =============================================================================
+# STAN Configuration
+# =============================================================================
+
+STANHEADERS_SRC = $(shell "$(R_HOME)/bin$(R_ARCH_BIN)/Rscript" --vanilla -e "cat(system.file('include', 'src', package = 'StanHeaders', mustWork = TRUE))" -e "cat(' ')" -e "cat(system.file('include', 'stan', 'math', 'prim', 'fun', package = 'StanHeaders', mustWork = TRUE))")
+
+STANC_FLAGS = $(shell "$(R_HOME)/bin$(R_ARCH_BIN)/Rscript" --vanilla -e "cat(ifelse(utils::packageVersion('rstan') >= 2.26, '-DUSE_STANC3', ''))")
+
+# =============================================================================
+# Combined Compilation Flags
+# =============================================================================
+
+PKG_CPPFLAGS = -I"$(TMB_INC)" -I"$(RCPPEIGEN_INC)" \
+               -I"../inst/include" \
+               -I"$(STANHEADERS_SRC)" \
+               -DBOOST_DISABLE_ASSERTS \
+               -DEIGEN_NO_DEBUG \
+               -DBOOST_MATH_OVERFLOW_ERROR_POLICY=errno_on_error \
+               $(STANC_FLAGS)
+
+PKG_CXXFLAGS = -DTMB_LIB_INIT=R_init_RiskMap \
+               -DTMB_EIGEN_DISABLE_WARNINGS \
+               -O2
+
+PKG_LIBS = $(shell "$(R_HOME)/bin$(R_ARCH_BIN)/Rscript" --vanilla -e "RcppParallel::RcppParallelLibs()") $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)
+
+# =============================================================================
+# STAN Model Sources
+# =============================================================================
+
+SOURCES = $(wildcard stan_files/*.cc)
+OBJECTS = $(SOURCES:.cc=.o)
+
+# =============================================================================
+# Compilation Rules
+# =============================================================================
+
+all: $(SHLIB) $(OBJECTS)
+
+clean:
+	@rm -rf stan_files

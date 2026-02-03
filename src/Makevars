@@ -1,0 +1,10 @@
+CXX_STD = CXX17
+
+TMB_INC = $(shell echo 'cat(system.file("include", package="TMB"))' | "${R_HOME}/bin/R" --slave --vanilla)
+RCPPEIGEN_INC = $(shell echo 'cat(system.file("include", package="RcppEigen"))' | "${R_HOME}/bin/R" --slave --vanilla)
+
+PKG_CXXFLAGS = -I"$(TMB_INC)" -I"$(RCPPEIGEN_INC)" \
+               -DTMB_LIB_INIT=R_init_RiskMap \
+               -DTMB_EIGEN_DISABLE_WARNINGS
+
+PKG_LIBS = $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)

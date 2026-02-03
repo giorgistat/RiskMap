@@ -20,15 +20,16 @@ Provides a \code{print} method for the summary of "RiskMap" objects, detailing t
 \details{
 This function prints a detailed summary of a fitted "RiskMap" model, including:
 \itemize{
-  \item The type of geostatistical model (e.g., Gaussian, Binomial, Poisson).
+  \item The type of geostatistical model (e.g., Gaussian, Binomial, Poisson, Joint Prevalence-Intensity).
   \item Confidence intervals for parameter estimates.
   \item Regression coefficients with their standard errors and p-values.
   \item Measurement error variance, if applicable.
   \item Spatial process parameters, including the Matern covariance parameters.
   \item Variance of the nugget effect, if applicable.
   \item Unstructured random effects variances, if applicable.
+  \item For DSGM: overdispersion parameter, fecundity rate, and MDA impact parameters.
   \item Log-likelihood of the model.
-  \item Akaike Information Criterion (AIC) for Gaussian models.
+  \item Akaike Information Criterion (AIC) for Gaussian models and DSGM.
 }
 }
 \author{

@@ -1,3 +1,35 @@
+##' @keywords internal
+get_stan_model <- function(messages = TRUE) {
+
+  # Return cached model if available
+  if (!is.null(.dsgm_cache$stan_model)) {
+    if(messages) message("Using cached STAN model")
+    return(.dsgm_cache$stan_model)
+  }
+
+  if(messages) message("Compiling STAN model (first use in this session)...")
+
+  # Read the STAN code from the package
+  stan_file <- system.file("stan/dsgm_spatial.stan", package = "RiskMap")
+
+  if (!file.exists(stan_file)) {
+    stop("STAN model file not found in package")
+  }
+
+  # Compile and cache
+  .dsgm_cache$stan_model <- rstan::stan_model(
+    file = stan_file,
+    model_name = "dsgm_spatial",
+    verbose = FALSE,
+    auto_write = TRUE
+  )
+
+  if(messages) message("STAN model compiled and cached")
+
+  return(.dsgm_cache$stan_model)
+}
+
+
 ##' @title Sample spatial process using STAN
 ##' @description Uses STAN to sample S(x) from posterior given fixed parameters
 ##' @param y_prev Binary infection indicators
@@ -90,182 +122,22 @@ sample_spatial_process_stan <- function(y_prev,
     phi = par$phi
   )
 
-  # =============================================================================
-  # STAN MODEL CODE (CORRECTED)
-  # =============================================================================
-
-  stan_code <- "
-  functions {
-    // Compute prevalence from mean worm burden
-    real compute_prevalence(real mu_W, real k, real rho) {
-      real term = k / (k + mu_W * (1 - exp(-rho)));
-      real pr = 1 - pow(term, k);
-
-      // Clamp prevalence
-      if (pr < 1e-10) pr = 1e-10;
-      if (pr > 1 - 1e-10) pr = 1 - 1e-10;
-
-      return pr;
-    }
-
-    // Compute conditional mean intensity
-    real compute_mu_C(real mu_W, real pr, real rho) {
-      return (rho * mu_W) / pr;
-    }
-
-    // Compute conditional variance
-    real compute_sigma2_C(real mu_W, real pr, real k, real rho) {
-      real var1 = (rho * mu_W * (1 + rho)) / pr;
-      real var2 = (square(rho) * square(mu_W) / pr) * (1.0/k + 1 - 1.0/pr);
-      real result = var1 + var2;
-
-      // Safeguard against numerical issues
-      if (result < 1e-10) result = 1e-10;
-
-      return result;
-    }
-
-    // Compute shifted Gamma parameters
-    // CRITICAL FIX: Returns [shape, RATE] not [shape, scale]
-    vector compute_gamma_params(real mu_W, real pr, real k, real rho) {
-      vector[2] params;
-      real mu_C = compute_mu_C(mu_W, pr, rho);
-      real sigma2_C = compute_sigma2_C(mu_W, pr, k, rho);
-
-      // Ensure mu_C > 1 and sigma2_C > 0
-      if (mu_C <= 1.0) mu_C = 1.0 + 1e-10;
-      if (sigma2_C < 1e-10) sigma2_C = 1e-10;
-
-      // kappa = (mu_C - 1)^2 / sigma2_C (shape)
-      // lambda = (mu_C - 1) / sigma2_C (RATE, not scale!)
-      // Note: STAN's gamma_lpdf uses (shape, rate) parameterization
-      params[1] = square(mu_C - 1) / sigma2_C;  // kappa (shape)
-      params[2] = (mu_C - 1) / sigma2_C;         // lambda (rate = 1/theta)
-
-      return params;
-    }
-  }
-
-  data {
-    int<lower=1> n;              // Number of observations
-    int<lower=1> n_loc;          // Number of unique locations
-    int<lower=0> n_pos;          // Number of positive observations
-    int<lower=1> p;              // Number of covariates
-
-    // Response data
-    int<lower=0, upper=1> y[n];  // Binary infection indicator
-    vector<lower=1>[n_pos] C_pos; // Egg counts for positives
-    int<lower=1, upper=n> pos_idx[n_pos]; // Indices of positives
-
-    // Location mapping
-    int<lower=1, upper=n_loc> ID_coords[n];
-
-    // Distance matrix
-    matrix[n_loc, n_loc] D_mat;
-
-    // Fixed effects
-    vector[n] eta_fixed;         // D * beta (without spatial effect)
-    vector<lower=0, upper=1>[n] mda_impact; // MDA impact function
-
-    // Fixed parameters
-    real<lower=0> k;             // Aggregation parameter
-    real<lower=0> rho;           // Detection rate
-    real<lower=0> sigma2;        // Spatial variance
-    real<lower=0> phi;           // Spatial range
-  }
-
-  transformed data {
-    // PERFORMANCE FIX: Compute correlation matrix ONCE (not every iteration!)
-    // Since phi is fixed (data), R and L are constants
-    matrix[n_loc, n_loc] R;
-    matrix[n_loc, n_loc] L;
-
-    // Build correlation matrix using exponential kernel
-    for (i in 1:n_loc) {
-      R[i, i] = 1.0;
-      for (j in (i+1):n_loc) {
-        R[i, j] = exp(-D_mat[i, j] / phi);
-        R[j, i] = R[i, j];
-      }
-    }
-
-    // Cholesky decomposition
-    L = cholesky_decompose(R);
-  }
-
-  parameters {
-    vector[n_loc] S_raw;         // Standardized spatial process
-  }
-
-  transformed parameters {
-    vector[n_loc] S;
-    vector[n] mu_W_star;
-    vector[n] mu_W;
-    vector[n] pr0;
-
-    // Spatial process: S ~ N(0, sigma2 * R)
-    // Using pre-computed L from transformed data
-    S = sqrt(sigma2) * L * S_raw;
-
-    // Mean worm burden
-    for (i in 1:n) {
-      mu_W_star[i] = exp(eta_fixed[i] + S[ID_coords[i]]);
-      mu_W[i] = mu_W_star[i] * mda_impact[i];
-      pr0[i] = compute_prevalence(mu_W[i], k, rho);
-    }
-  }
-
-  model {
-    // Prior on standardized spatial process
-    S_raw ~ normal(0, 1);
-
-    // Likelihood for zeros
-    for (i in 1:n) {
-      if (y[i] == 0) {
-        target += log(1 - pr0[i]);
-      }
-    }
-
-    // Likelihood for positives
-    for (i in 1:n_pos) {
-      int idx = pos_idx[i];
-      real mu_W_i = mu_W[idx];
-      real pr0_i = pr0[idx];
-      vector[2] gamma_params;
-
-      // Prevalence contribution
-      target += log(pr0_i);
-
-      // Intensity contribution (shifted Gamma)
-      gamma_params = compute_gamma_params(mu_W_i, pr0_i, k, rho);
-
-      // C - 1 ~ Gamma(kappa, lambda) where lambda is RATE
-      if (gamma_params[1] > 0 && gamma_params[2] > 0) {
-        target += gamma_lpdf(C_pos[i] - 1 | gamma_params[1], gamma_params[2]);
-      }
-    }
-  }
-  "
-
-  # =============================================================================
-  # COMPILE AND SAMPLE
-  # =============================================================================
-
   if(messages) {
-    message("Compiling STAN model...")
+    message("Loading pre-compiled STAN model...")
   }
 
-  # Compile model
-  stan_model <- rstan::stan_model(model_code = stan_code,
-                                  model_name = "dsgm_spatial",
-                                  verbose = FALSE)
+  # Get the model that was compiled at package installation
+  stan_model <- get_stan_model()
 
   if(messages) {
     message(sprintf("Sampling %d iterations (%d warmup) across %d chains...",
                     n_samples + n_warmup, n_warmup, n_chains))
   }
 
-  # Sample
+  # =============================================================================
+  # SAMPLE
+  # =============================================================================
+
   fit <- rstan::sampling(
     stan_model,
     data = stan_data,
@@ -1627,7 +1499,7 @@ dsgm <- function(formula,
 
   if(is.null(par0)) {
     if(messages) {
-      message("\n=== STEP 1: Computing initial parameter values ===")
+      message("\n=== Computing initial parameter values ===")
     }
 
     par0 <- dsgm_initial_value(
@@ -1666,7 +1538,7 @@ dsgm <- function(formula,
   # =============================================================================
 
   if(messages) {
-    message("\n=== STEP 2: Sampling spatial process using STAN ===")
+    message("\n=== Sampling spatial process using STAN ===")
     message(sprintf("STAN settings:"))
     message(sprintf("  - Samples: %d", n_samples))
     message(sprintf("  - Warmup: %d", n_warmup))
@@ -1696,7 +1568,7 @@ dsgm <- function(formula,
 
 
   if(messages) {
-    message("\n=== STEP 3: Fitting via TMB-MCML ===")
+    message("\n=== Fitting via TMB-MCML ===")
   }
 
   fit_result <- dsgm_fit_tmb(
@@ -1725,30 +1597,6 @@ dsgm <- function(formula,
   }
 
   # =============================================================================
-  # FIT THE MODEL (placeholder - to be implemented)
-  # =============================================================================
-
-  if(messages) {
-    message("\n=== STEP 3: Fitting joint prevalence-intensity model via MCML ===")
-    message(sprintf("  - %d observations at %d locations", n, n_loc))
-    message(sprintf("  - %d MDA rounds", length(mda_times)))
-    message(sprintf("  - %d covariates", p))
-  }
-
-  # This would call the MCML optimization using the spatial samples
-  # fit_result <- dsgm_fit(...)
-  # For now, return a placeholder
-  fit_result <- list(
-    params = par0,
-    convergence = 0,
-    log_likelihood = NA
-  )
-
-  if(messages) {
-    message("Model fitting not yet implemented (placeholder)")
-  }
-
-  # =============================================================================
   # PREPARE RETURN OBJECT
   # =============================================================================
 
@@ -1759,7 +1607,6 @@ dsgm <- function(formula,
   res$n_positive <- sum(y_prev)
   res$D <- D
   res$coords <- coords_unique
-  res$coords_all <- coords_all
   res$mda_times <- mda_times
   res$survey_times_data <- survey_times_data
   res$int_mat <- int_mat
@@ -1770,7 +1617,7 @@ dsgm <- function(formula,
   res$crs <- crs
   res$scale_to_km <- scale_to_km
   res$data_sf <- data
-  res$family <- "zero_inflated_gamma"
+  res$family <- "intprev"
   res$cov_offset <- cov_offset
   res$call <- match.call()
 
@@ -1782,6 +1629,9 @@ dsgm <- function(formula,
 
   # Add fitted results
   res$model_params <- fit_result$params
+  res$params_se <- fit_result$params_se
+  res$tmb_sdr <- fit_result$tmb_sdr
+  res$tmb_obj <- fit_result$tmb_obj
   res$convergence <- fit_result$convergence
   res$log_likelihood <- fit_result$log_likelihood
 
@@ -1805,11 +1655,7 @@ dsgm <- function(formula,
     max_treedepth = max_treedepth
   )
 
-  class(res) <- c("dsgm", "RiskMap")
-
-  if(messages) {
-    message("\n=== Model fitting complete! ===")
-  }
+  class(res) <- "RiskMap"
 
   return(res)
 }

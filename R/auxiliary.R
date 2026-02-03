@@ -362,25 +362,93 @@ interpret.formula <- function(formula) {
 
 ##' @title Extract Parameter Estimates from a "RiskMap" Model Fit
 ##' @description This \code{coef} method for the "RiskMap" class extracts the
-##' maximum likelihood estimates from model fits obtained from the \code{\link{glgpm}} function.
-##' @param object An object of class "RiskMap" obtained as a result of a call to \code{\link{glgpm}}.
+##' maximum likelihood estimates from model fits obtained from the \code{\link{glgpm}} or \code{\link{dsgm}} functions.
+##' @param object An object of class "RiskMap" obtained as a result of a call to \code{\link{glgpm}} or \code{\link{dsgm}}.
 ##' @param ... other parameters.
-##' @return A list containing the maximum likelihood estimates:
+##' @return A list containing the maximum likelihood estimates. For standard models:
 ##' \item{beta}{A vector of coefficient estimates.}
 ##' \item{sigma2}{The estimate for the variance parameter \eqn{\sigma^2}.}
 ##' \item{phi}{The estimate for the spatial range parameter \eqn{\phi}.}
 ##' \item{tau2}{The estimate for the nugget effect parameter \eqn{\tau^2}, if applicable.}
 ##' \item{sigma2_me}{The estimate for the measurement error variance \eqn{\sigma^2_{me}}, if applicable.}
 ##' \item{sigma2_re}{A vector of variance estimates for the random effects, if applicable.}
+##' For DSGM models (joint prevalence-intensity):
+##' \item{beta}{A vector of coefficient estimates for mean worm burden.}
+##' \item{k}{The negative binomial aggregation parameter.}
+##' \item{rho}{The egg detection rate (fecundity).}
+##' \item{alpha_W}{The immediate worm burden reduction (if estimated).}
+##' \item{gamma_W}{The decay rate of MDA effect (if estimated).}
+##' \item{sigma2}{The spatial process variance.}
+##' \item{phi}{The spatial correlation scale parameter.}
 ##' @details The function processes the \code{RiskMap} object to extract and name the estimated parameters appropriately, transforming them if necessary.
 ##' @note This function handles both Gaussian and non-Gaussian families, and accounts for fixed and random effects in the model.
 ##' @author Emanuele Giorgi \email{e.giorgi@@lancaster.ac.uk}
 ##' @author Claudio Fronterre \email{c.fronterr@@lancaster.ac.uk}
-##' @seealso \code{\link{glgpm}}
+##' @seealso \code{\link{glgpm}}, \code{\link{dsgm}}
 ##' @method coef RiskMap
 ##' @export
 ##'
-coef.RiskMap <- function(object,...) {
+coef.RiskMap <- function(object, ...) {
+
+  # =============================================================================
+  # CHECK IF THIS IS A DSGM MODEL (joint prevalence-intensity)
+  # =============================================================================
+
+  is_dsgm <- !is.null(object$family) && object$family == "intprev"
+
+  if(is_dsgm) {
+    # =========================================================================
+    # DSGM MODEL: Extract from model_params
+    # =========================================================================
+
+    if(is.null(object$model_params)) {
+      stop("DSGM model object does not contain 'model_params'")
+    }
+
+    params <- object$model_params
+
+    # Get coefficient names
+    beta_est <- params$beta
+    if(!is.null(object$D) && !is.null(colnames(object$D))) {
+      names(beta_est) <- colnames(object$D)
+    } else if(length(beta_est) == 1) {
+      names(beta_est) <- "Intercept"
+    } else {
+      names(beta_est) <- paste0("beta", seq_along(beta_est))
+    }
+
+    # Build result list
+    res <- list()
+    res$beta <- beta_est
+    res$k <- as.numeric(params$k)
+    res$rho <- as.numeric(params$rho)
+
+    # MDA parameters (may be fixed or estimated)
+    if(!is.null(params$alpha_W)) {
+      res$alpha_W <- as.numeric(params$alpha_W)
+    } else if(!is.null(object$fix_alpha_W)) {
+      res$alpha_W <- object$fix_alpha_W
+      attr(res$alpha_W, "fixed") <- TRUE
+    }
+
+    if(!is.null(params$gamma_W)) {
+      res$gamma_W <- as.numeric(params$gamma_W)
+    } else if(!is.null(object$fix_gamma_W)) {
+      res$gamma_W <- object$fix_gamma_W
+      attr(res$gamma_W, "fixed") <- TRUE
+    }
+
+    # Spatial parameters
+    res$sigma2 <- as.numeric(params$sigma2)
+    res$phi <- as.numeric(params$phi)
+
+    return(res)
+  }
+
+  # =============================================================================
+  # STANDARD RISKMAP MODEL (existing code)
+  # =============================================================================
+
   n_re <- length(object$re)
   if(n_re > 0) {
     re_names <- names(object$re)
@@ -488,33 +556,277 @@ coef.RiskMap <- function(object,...) {
 
 ##' @title Summarize Model Fits
 ##' @description Provides a \code{summary} method for the "RiskMap" class that computes the standard errors and p-values for likelihood-based model fits.
-##' @param object An object of class "RiskMap" obtained as a result of a call to \code{\link{glgpm}}.
+##' @param object An object of class "RiskMap" obtained as a result of a call to \code{\link{glgpm}} or \code{\link{dsgm}}.
 ##' @param ... other parameters.
 ##' @param conf_level The confidence level for the intervals (default is 0.95).
-##' @return A list containing:
-##' \item{reg_coef}{A matrix with the estimates, standard errors, z-values, p-values, and confidence intervals for the regression coefficients.}
-##' \item{me}{A matrix with the estimates and confidence intervals for the measurement error variance, if applicable.}
-##' \item{sp}{A matrix with the estimates and confidence intervals for the spatial process parameters.}
-##' \item{tau2}{The fixed nugget variance, if applicable.}
-##' \item{ranef}{A matrix with the estimates and confidence intervals for the random effects variances, if applicable.}
-##' \item{conf_level}{The confidence level used for the intervals.}
-##' \item{family}{The family of the model (e.g., "gaussian").}
-##' \item{kappa}{The kappa parameter of the model.}
-##' \item{log.lik}{The log-likelihood of the model fit.}
-##' \item{cov_offset_used}{A logical indicating if a covariance offset was used.}
-##' \item{aic}{The Akaike Information Criterion (AIC) for the model, if applicable.}
-##' @details This function computes the standard errors and p-values for the parameters of a "RiskMap" model, adjusting for the covariance structure if needed.
-##' @author Emanuele Giorgi \email{e.giorgi@@lancaster.ac.uk}
-##' @author Claudio Fronterre \email{c.fronterr@@lancaster.ac.uk}
-##' @note Handles both Gaussian and non-Gaussian families, and accounts for fixed and random effects in the model.
-##' @seealso \code{\link{glgpm}}, \code{\link{coef.RiskMap}}
+##' @return A list containing parameter estimates, standard errors, and confidence intervals.
 ##' @method summary RiskMap
 ##' @export
 summary.RiskMap <- function(object, ..., conf_level = 0.95) {
 
   `%||%` <- function(a, b) if (!is.null(a)) a else b
 
-  # --- Link reporting ----------------------------------------------------------
+  alpha <- 1 - conf_level
+  res <- list()
+
+  # =============================================================================
+  # CHECK IF THIS IS A DSGM MODEL (joint prevalence-intensity)
+  # =============================================================================
+
+  is_dsgm <- !is.null(object$family) && object$family == "intprev"
+
+  if(is_dsgm) {
+    # =========================================================================
+    # DSGM SUMMARY (joint prevalence-intensity model)
+    # =========================================================================
+
+    params <- object$model_params
+
+    # Check what we have available
+    has_params_se <- !is.null(object$params_se)
+    has_tmb_sdr <- !is.null(object$tmb_sdr)
+
+    if(!has_params_se && !has_tmb_sdr) {
+      stop("No standard errors available. Object must contain either 'params_se' or 'tmb_sdr'")
+    }
+
+    # Extract standard errors
+    if(has_params_se) {
+      # Use directly provided standard errors
+      params_se <- object$params_se
+
+      # Validate that all components exist
+      if(is.null(params_se$beta)) {
+        stop("params_se$beta is missing")
+      }
+
+    } else if(has_tmb_sdr) {
+      # Extract from TMB sdreport object
+
+      # Get the sdreport summary
+      sdr <- object$tmb_sdr
+
+      # Extract fixed effects (on transformed scale)
+      fixed_summary <- summary(sdr, "fixed")
+
+      # Extract reported parameters (on natural scale)
+      report_summary <- summary(sdr, "report")
+
+      # Debug: print what we have
+      cat("Available fixed parameters:\n")
+      print(rownames(fixed_summary))
+      cat("\nAvailable report parameters:\n")
+      print(rownames(report_summary))
+
+      # Beta coefficients are in fixed effects
+      beta_idx <- grep("^beta", rownames(fixed_summary))
+
+      if(length(beta_idx) == 0) {
+        stop("Could not find beta coefficients in TMB sdreport")
+      }
+
+      beta_se <- fixed_summary[beta_idx, "Std. Error", drop = FALSE]
+
+      # Other parameters are in report
+      params_se <- list(
+        beta = as.numeric(beta_se),
+        k = as.numeric(report_summary["k", "Std. Error"]),
+        rho = as.numeric(report_summary["rho", "Std. Error"]),
+        sigma2 = as.numeric(report_summary["sigma2", "Std. Error"]),
+        phi = as.numeric(report_summary["phi", "Std. Error"])
+      )
+
+      # Add MDA parameters if they exist in report
+      if("alpha_W" %in% rownames(report_summary)) {
+        params_se$alpha_W <- as.numeric(report_summary["alpha_W", "Std. Error"])
+      }
+      if("gamma_W" %in% rownames(report_summary)) {
+        params_se$gamma_W <- as.numeric(report_summary["gamma_W", "Std. Error"])
+      }
+    }
+
+    # Validate we have all necessary components
+    p <- length(params$beta)
+
+    if(length(params_se$beta) != p) {
+      stop(sprintf("Mismatch: params$beta has length %d but params_se$beta has length %d",
+                   p, length(params_se$beta)))
+    }
+
+    # -----------------------------------------------------------------------
+    # 1. REGRESSION COEFFICIENTS
+    # -----------------------------------------------------------------------
+
+    beta_est <- as.numeric(params$beta)
+    beta_se <- as.numeric(params_se$beta)
+
+    # Get coefficient names
+    if(!is.null(object$D) && !is.null(colnames(object$D))) {
+      beta_names <- colnames(object$D)
+    } else {
+      beta_names <- paste0("beta", seq_len(p))
+    }
+
+    # Calculate z-values and p-values
+    zval <- beta_est / beta_se
+    pval <- 2 * pnorm(-abs(zval))
+
+    # Build matrix
+    reg_coef_matrix <- cbind(
+      Estimate = beta_est,
+      "Lower limit" = beta_est - beta_se * qnorm(1 - alpha / 2),
+      "Upper limit" = beta_est + beta_se * qnorm(1 - alpha / 2),
+      StdErr = beta_se,
+      z.value = zval,
+      p.value = pval
+    )
+    rownames(reg_coef_matrix) <- beta_names
+
+    res$reg_coef <- reg_coef_matrix
+
+    # -----------------------------------------------------------------------
+    # 2. SPATIAL PROCESS PARAMETERS
+    # -----------------------------------------------------------------------
+
+    sigma2_est <- as.numeric(params$sigma2)
+    sigma2_se <- as.numeric(params_se$sigma2)
+    phi_est <- as.numeric(params$phi)
+    phi_se <- as.numeric(params_se$phi)
+
+    # Use delta method for log-normal CI
+    sigma2_lower <- exp(log(sigma2_est) - qnorm(1 - alpha / 2) * sigma2_se / sigma2_est)
+    sigma2_upper <- exp(log(sigma2_est) + qnorm(1 - alpha / 2) * sigma2_se / sigma2_est)
+    phi_lower <- exp(log(phi_est) - qnorm(1 - alpha / 2) * phi_se / phi_est)
+    phi_upper <- exp(log(phi_est) + qnorm(1 - alpha / 2) * phi_se / phi_est)
+
+    sp_matrix <- rbind(
+      "Spatial process var." = c(sigma2_est, sigma2_lower, sigma2_upper),
+      "Spatial corr. scale" = c(phi_est, phi_lower, phi_upper)
+    )
+    colnames(sp_matrix) <- c("Estimate", "Lower limit", "Upper limit")
+
+    res$sp <- sp_matrix
+
+    # -----------------------------------------------------------------------
+    # 3. MDA IMPACT FUNCTION PARAMETERS
+    # -----------------------------------------------------------------------
+
+    alpha_W_est <- params$alpha_W %||% object$fix_alpha_W
+    gamma_W_est <- params$gamma_W %||% object$fix_gamma_W
+
+    if(is.null(object$fix_alpha_W) && is.null(object$fix_gamma_W)) {
+      # Both estimated
+      alpha_W_se <- as.numeric(params_se$alpha_W)
+      gamma_W_se <- as.numeric(params_se$gamma_W)
+
+      # Alpha_W is bounded [0,1], use normal CI with truncation
+      alpha_lower <- pmax(0, pmin(1, alpha_W_est - qnorm(1 - alpha / 2) * alpha_W_se))
+      alpha_upper <- pmax(0, pmin(1, alpha_W_est + qnorm(1 - alpha / 2) * alpha_W_se))
+
+      # Gamma_W is positive, use log-normal CI
+      gamma_lower <- exp(log(gamma_W_est) - qnorm(1 - alpha / 2) * gamma_W_se / gamma_W_est)
+      gamma_upper <- exp(log(gamma_W_est) + qnorm(1 - alpha / 2) * gamma_W_se / gamma_W_est)
+
+      mda_matrix <- rbind(
+        "Worm burden reduction (alpha_W)" = c(alpha_W_est, alpha_lower, alpha_upper),
+        "Decay rate (gamma_W)" = c(gamma_W_est, gamma_lower, gamma_upper)
+      )
+      colnames(mda_matrix) <- c("Estimate", "Lower limit", "Upper limit")
+      res$mda_par <- mda_matrix
+
+    } else if(is.null(object$fix_alpha_W)) {
+      # Only alpha estimated
+      alpha_W_se <- as.numeric(params_se$alpha_W)
+      alpha_lower <- pmax(0, pmin(1, alpha_W_est - qnorm(1 - alpha / 2) * alpha_W_se))
+      alpha_upper <- pmax(0, pmin(1, alpha_W_est + qnorm(1 - alpha / 2) * alpha_W_se))
+
+      mda_matrix <- rbind(
+        "Worm burden reduction (alpha_W)" = c(alpha_W_est, alpha_lower, alpha_upper)
+      )
+      colnames(mda_matrix) <- c("Estimate", "Lower limit", "Upper limit")
+      res$mda_par <- mda_matrix
+      res$gamma_W_fixed <- object$fix_gamma_W
+
+    } else if(is.null(object$fix_gamma_W)) {
+      # Only gamma estimated
+      gamma_W_se <- as.numeric(params_se$gamma_W)
+      gamma_lower <- exp(log(gamma_W_est) - qnorm(1 - alpha / 2) * gamma_W_se / gamma_W_est)
+      gamma_upper <- exp(log(gamma_W_est) + qnorm(1 - alpha / 2) * gamma_W_se / gamma_W_est)
+
+      mda_matrix <- rbind(
+        "Decay rate (gamma_W)" = c(gamma_W_est, gamma_lower, gamma_upper)
+      )
+      colnames(mda_matrix) <- c("Estimate", "Lower limit", "Upper limit")
+      res$mda_par <- mda_matrix
+      res$alpha_W_fixed <- object$fix_alpha_W
+
+    } else {
+      # Both fixed
+      res$alpha_W_fixed <- object$fix_alpha_W
+      res$gamma_W_fixed <- object$fix_gamma_W
+    }
+
+    # -----------------------------------------------------------------------
+    # 4. OVERDISPERSION PARAMETER (k)
+    # -----------------------------------------------------------------------
+
+    k_est <- as.numeric(params$k)
+    k_se <- as.numeric(params_se$k)
+    k_lower <- exp(log(k_est) - qnorm(1 - alpha / 2) * k_se / k_est)
+    k_upper <- exp(log(k_est) + qnorm(1 - alpha / 2) * k_se / k_est)
+
+    k_matrix <- rbind(
+      "Aggregation param. (k)" = c(k_est, k_lower, k_upper)
+    )
+    colnames(k_matrix) <- c("Estimate", "Lower limit", "Upper limit")
+    res$overdispersion <- k_matrix
+
+    # -----------------------------------------------------------------------
+    # 5. FECUNDITY RATE (rho)
+    # -----------------------------------------------------------------------
+
+    rho_est <- as.numeric(params$rho)
+    rho_se <- as.numeric(params_se$rho)
+    rho_lower <- exp(log(rho_est) - qnorm(1 - alpha / 2) * rho_se / rho_est)
+    rho_upper <- exp(log(rho_est) + qnorm(1 - alpha / 2) * rho_se / rho_est)
+
+    rho_matrix <- rbind(
+      "Fecundity rate" = c(rho_est, rho_lower, rho_upper)
+    )
+    colnames(rho_matrix) <- c("Estimate", "Lower limit", "Upper limit")
+    res$fecundity <- rho_matrix
+
+    # -----------------------------------------------------------------------
+    # Additional info
+    # -----------------------------------------------------------------------
+
+    res$conf_level <- conf_level
+    res$family <- "intprev"
+    res$kappa <- 0.5  # Exponential correlation for DSGM
+    res$log.lik <- object$log_likelihood %||% NA
+    res$cov_offset_used <- !is.null(object$cov_offset) && !all(object$cov_offset == 0)
+    res$call <- object$call %||% NULL
+    res$is_dsgm <- TRUE
+
+    # Compute AIC
+    n_params <- p + 5  # beta, k, rho, sigma2, phi
+    if(is.null(object$fix_alpha_W)) n_params <- n_params + 1
+    if(is.null(object$fix_gamma_W)) n_params <- n_params + 1
+
+    if(!is.na(res$log.lik)) {
+      res$aic <- 2 * n_params - 2 * res$log.lik
+    }
+
+    class(res) <- "summary.RiskMap"
+    return(res)
+  }
+
+  # =============================================================================
+  # STANDARD RISKMAP SUMMARY (existing code - unchanged)
+  # =============================================================================
+
+  # [Keep all existing code for standard RiskMap models...]
+
   link_name <- NULL
   inv_expr  <- NULL
   if (!is.null(object$linkf) && is.list(object$linkf) && is.function(object$linkf$inv)) {
@@ -524,7 +836,6 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
       error = function(e) "Inverse link function = <user-supplied function>"
     )
   } else {
-    # Fallback: canonical links by family
     if (identical(object$family, "poisson")) {
       link_name <- "canonical (log)"
       inv_expr  <- "Inverse link function = exp(x)"
@@ -537,12 +848,10 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
     }
   }
 
-  # --- existing code -----------------------------------------------------------
   n_re <- length(object$re)
   if (n_re > 0) {
     re_names <- names(object$re)
   }
-  alpha <- 1 - conf_level
 
   p <- ncol(object$D)
   ind_beta <- 1:p
@@ -639,9 +948,7 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
   covariance_new <- solve(-H_new)
 
   se_par <- sqrt(diag(covariance_new))
-  res <- list()
 
-  # Regression coefficients
   zval <- object$estimate[ind_beta] / se_par[ind_beta]
   res$reg_coef <- cbind(
     Estimate     = object$estimate[ind_beta],
@@ -652,7 +959,6 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
     p.value      = 2 * pnorm(-abs(zval))
   )
 
-  # Measurement error variance (linear model)
   if (object$family == "gaussian") {
     if (is.null(object$fix_var_me)) {
       res$me <- cbind(
@@ -665,7 +971,6 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
     }
   }
 
-  # Spatial process
   res$sp <- cbind(
     Estimate     = object$estimate[ind_sp],
     "Lower limit" = exp(log(object$estimate[ind_sp]) - qnorm(1 - alpha / 2) * se_par[ind_sp]),
@@ -674,7 +979,6 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
 
   if (!is.null(object$fix_tau2)) res$tau2 <- object$fix_tau2
 
-  # Random effects
   if (n_re > 0) {
     res$ranef <- cbind(
       Estimate     = object$estimate[ind_sigma2_re],
@@ -722,19 +1026,17 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
   res$log.lik         <- object$log.lik
   res$cov_offset_used <- !(is.null(object$cov_offset) || all(object$cov_offset==0))
   if (object$family == "gaussian") {
-    # fix bug: use length(object$estimate), not res$estimate
     res$aic <- 2 * length(object$estimate) - 2 * res$log.lik
   }
 
-  # New: include call and link info for printing
   res$call      <- object$call %||% NULL
   res$link_name <- link_name
   res$invlink_expression <- inv_expr
+  res$is_dsgm <- FALSE
 
   class(res) <- "summary.RiskMap"
   return(res)
 }
-
 
 ##' @title Print Summary of RiskMap Model
 ##' @description Provides a \code{print} method for the summary of "RiskMap" objects, detailing the model type, parameter estimates, and other relevant statistics.
@@ -742,15 +1044,16 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
 ##' @param ... other parameters.
 ##' @details This function prints a detailed summary of a fitted "RiskMap" model, including:
 ##' \itemize{
-##'   \item The type of geostatistical model (e.g., Gaussian, Binomial, Poisson).
+##'   \item The type of geostatistical model (e.g., Gaussian, Binomial, Poisson, Joint Prevalence-Intensity).
 ##'   \item Confidence intervals for parameter estimates.
 ##'   \item Regression coefficients with their standard errors and p-values.
 ##'   \item Measurement error variance, if applicable.
 ##'   \item Spatial process parameters, including the Matern covariance parameters.
 ##'   \item Variance of the nugget effect, if applicable.
 ##'   \item Unstructured random effects variances, if applicable.
+##'   \item For DSGM: overdispersion parameter, fecundity rate, and MDA impact parameters.
 ##'   \item Log-likelihood of the model.
-##'   \item Akaike Information Criterion (AIC) for Gaussian models.
+##'   \item Akaike Information Criterion (AIC) for Gaussian models and DSGM.
 ##' }
 ##' @return This function is used for its side effect of printing to the console. It does not return a value.
 ##' @author Emanuele Giorgi \email{e.giorgi@@lancaster.ac.uk}
@@ -764,6 +1067,76 @@ print.summary.RiskMap <- function(x, ...) {
     cat("Call:\n")
     cat(paste(deparse(x$call), collapse = "\n"), "\n\n", sep = "")
   }
+
+  # =============================================================================
+  # DSGM MODEL (joint prevalence-intensity)
+  # =============================================================================
+
+  if(!is.null(x$is_dsgm) && x$is_dsgm) {
+
+    cat("Doubly stochastic geostatistical model with negative binomial worm burden\n\n")
+
+    cat("'Lower limit' and 'Upper limit' are the limits of the ",
+        x$conf_level * 100, "% confidence level intervals\n", sep = "")
+
+    # -------------------------------------------------------------------------
+    # 1. Regression coefficients
+    # -------------------------------------------------------------------------
+    cat("\nRegression coefficients (mean worm burden)\n")
+    printCoefmat(x$reg_coef, P.values = TRUE, has.Pvalue = TRUE)
+    if (x$cov_offset_used) cat("Offset included into the linear predictor\n")
+
+    # -------------------------------------------------------------------------
+    # 2. Spatial process parameters
+    # -------------------------------------------------------------------------
+    cat("\nSpatial Gaussian process\n")
+    cat("Exponential covariance function (kappa=", x$kappa, ")\n", sep = "")
+    printCoefmat(x$sp, Pvalues = FALSE)
+
+    # -------------------------------------------------------------------------
+    # 3. MDA impact function parameters
+    # -------------------------------------------------------------------------
+    cat("\nMDA impact on worm burden\n")
+    cat("f(t) = (1 - alpha_W * coverage * exp(-t/gamma_W))\n")
+
+    if(!is.null(x$mda_par)) {
+      printCoefmat(x$mda_par, Pvalues = FALSE)
+    }
+
+    if(!is.null(x$alpha_W_fixed)) {
+      cat("Worm burden reduction (alpha_W) fixed at ", x$alpha_W_fixed, "\n", sep = "")
+    }
+    if(!is.null(x$gamma_W_fixed)) {
+      cat("Decay rate (gamma_W) fixed at ", x$gamma_W_fixed, " years\n", sep = "")
+    }
+
+    # -------------------------------------------------------------------------
+    # 4. Overdispersion parameter
+    # -------------------------------------------------------------------------
+
+    cat("\n Negative binomial parameter for worm burden distribution\n")
+    printCoefmat(x$overdispersion, Pvalues = FALSE)
+
+    # -------------------------------------------------------------------------
+    # 5. Fecundity rate
+    # -------------------------------------------------------------------------
+    cat("Other parameters \n")
+    printCoefmat(x$fecundity, Pvalues = FALSE)
+
+    # -------------------------------------------------------------------------
+    # Model fit statistics
+    # -------------------------------------------------------------------------
+    cat("\nLog-likelihood: ", x$log.lik, "\n", sep = "")
+    if(!is.null(x$aic) && !is.na(x$aic)) {
+      cat("AIC: ", x$aic, "\n", sep = "")
+    }
+
+    return(invisible(x))
+  }
+
+  # =============================================================================
+  # STANDARD RISKMAP MODELS (existing code)
+  # =============================================================================
 
   # Model type
   if (x$family == "gaussian") {
@@ -828,7 +1201,6 @@ print.summary.RiskMap <- function(x, ...) {
   cat("\nLog-likelihood: ", x$log.lik, "\n", sep = "")
   if (x$family == "gaussian" && !is.null(x$aic)) cat("AIC: ", x$aic, "\n", sep = "")
 }
-
 
 
 ##' @title Generate LaTeX Tables from RiskMap Model Fits and Validation

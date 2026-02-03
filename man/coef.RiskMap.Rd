@@ -7,22 +7,30 @@
 \method{coef}{RiskMap}(object, ...)
 }
 \arguments{
-\item{object}{An object of class "RiskMap" obtained as a result of a call to \code{\link{glgpm}}.}
+\item{object}{An object of class "RiskMap" obtained as a result of a call to \code{\link{glgpm}} or \code{\link{dsgm}}.}
 
 \item{...}{other parameters.}
 }
 \value{
-A list containing the maximum likelihood estimates:
+A list containing the maximum likelihood estimates. For standard models:
 \item{beta}{A vector of coefficient estimates.}
 \item{sigma2}{The estimate for the variance parameter \eqn{\sigma^2}.}
 \item{phi}{The estimate for the spatial range parameter \eqn{\phi}.}
 \item{tau2}{The estimate for the nugget effect parameter \eqn{\tau^2}, if applicable.}
 \item{sigma2_me}{The estimate for the measurement error variance \eqn{\sigma^2_{me}}, if applicable.}
 \item{sigma2_re}{A vector of variance estimates for the random effects, if applicable.}
+For DSGM models (joint prevalence-intensity):
+\item{beta}{A vector of coefficient estimates for mean worm burden.}
+\item{k}{The negative binomial aggregation parameter.}
+\item{rho}{The egg detection rate (fecundity).}
+\item{alpha_W}{The immediate worm burden reduction (if estimated).}
+\item{gamma_W}{The decay rate of MDA effect (if estimated).}
+\item{sigma2}{The spatial process variance.}
+\item{phi}{The spatial correlation scale parameter.}
 }
 \description{
 This \code{coef} method for the "RiskMap" class extracts the
-maximum likelihood estimates from model fits obtained from the \code{\link{glgpm}} function.
+maximum likelihood estimates from model fits obtained from the \code{\link{glgpm}} or \code{\link{dsgm}} functions.
 }
 \details{
 The function processes the \code{RiskMap} object to extract and name the estimated parameters appropriately, transforming them if necessary.
@@ -31,7 +39,7 @@ The function processes the \code{RiskMap} object to extract and name the estimat
 This function handles both Gaussian and non-Gaussian families, and accounts for fixed and random effects in the model.
 }
 \seealso{
-\code{\link{glgpm}}
+\code{\link{glgpm}}, \code{\link{dsgm}}
 }
 \author{
 Emanuele Giorgi \email{e.giorgi@lancaster.ac.uk}
