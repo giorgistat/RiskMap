@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-
-=======
->>>>>>> 2ec0b26 (Completion of coding for the "dsgm" function)
 ##' @title Convert penalty list to TMB format
 ##' @keywords internal
 convert_penalty_to_tmb <- function(penalty) {
@@ -119,11 +115,6 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
   n <- length(y_prev)
   n_loc <- nrow(coords)
   S_samples <- S_samples_obj$S_samples
-<<<<<<< HEAD
-  dist_mat <- as.matrix(dist(coords))
-  pos_idx <- which(y_prev == 1) - 1  # 0-indexed
-
-=======
   pos_idx <- which(y_prev == 1) - 1  # 0-indexed
 
   # =============================================================================
@@ -167,7 +158,6 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
                     full_size, compressed_size, 100 * (1 - compressed_size/full_size)))
   }
 
->>>>>>> 2ec0b26 (Completion of coding for the "dsgm" function)
   tmb_penalty <- convert_penalty_to_tmb(penalty)
 
   # =============================================================================
@@ -183,13 +173,6 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
     cov_offset = cov_offset,
     S_samples = S_samples,
     ID_coords = ID_coords - 1,
-<<<<<<< HEAD
-    dist_mat = dist_mat,
-    survey_times = survey_times_data,
-    mda_times = mda_times,
-    int_mat = int_mat,
-    use_alpha_penalty = 0,  # No penalty for denominator
-=======
     dist_vec = dist_vec,
     n_loc = as.integer(n_loc),
     survey_times = survey_times_data,
@@ -199,7 +182,6 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
     mda_coverage = mda_coverage,
     n_mda_pairs = as.integer(n_mda_pairs),
     use_alpha_penalty = 0,
->>>>>>> 2ec0b26 (Completion of coding for the "dsgm" function)
     alpha_penalty_type = 1,
     alpha_param1 = 2,
     alpha_param2 = 2,
@@ -207,13 +189,8 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
     gamma_penalty_type = 1,
     gamma_param1 = 2,
     gamma_param2 = 1,
-<<<<<<< HEAD
-    compute_denominator_only = 1,  # SPECIAL FLAG
-    log_denominator_vals = numeric(nrow(S_samples))  # Dummy, not used
-=======
     compute_denominator_only = 1,
     log_denominator_vals = numeric(nrow(S_samples))
->>>>>>> 2ec0b26 (Completion of coding for the "dsgm" function)
   )
 
   # Parameters at θ₀
@@ -236,11 +213,7 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
   )
 
   # Extract denominator values
-<<<<<<< HEAD
-  obj_denom$fn()  # Trigger computation
-=======
   obj_denom$fn()
->>>>>>> 2ec0b26 (Completion of coding for the "dsgm" function)
   log_denominator_vals <- obj_denom$report()$log_f_vals
 
 
@@ -260,12 +233,6 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
     cov_offset = cov_offset,
     S_samples = S_samples,
     ID_coords = ID_coords - 1,
-<<<<<<< HEAD
-    dist_mat = dist_mat,
-    survey_times = survey_times_data,
-    mda_times = mda_times,
-    int_mat = int_mat,
-=======
     dist_vec = dist_vec,
     n_loc = as.integer(n_loc),
     survey_times = survey_times_data,
@@ -274,7 +241,6 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
     mda_j = mda_j,
     mda_coverage = mda_coverage,
     n_mda_pairs = as.integer(n_mda_pairs),
->>>>>>> 2ec0b26 (Completion of coding for the "dsgm" function)
     use_alpha_penalty = tmb_penalty$use_alpha_penalty,
     alpha_penalty_type = tmb_penalty$alpha_penalty_type,
     alpha_param1 = tmb_penalty$alpha_param1,
@@ -283,13 +249,8 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
     gamma_penalty_type = tmb_penalty$gamma_penalty_type,
     gamma_param1 = tmb_penalty$gamma_param1,
     gamma_param2 = tmb_penalty$gamma_param2,
-<<<<<<< HEAD
-    compute_denominator_only = 0,  # Normal mode
-    log_denominator_vals = log_denominator_vals  # Use computed values
-=======
     compute_denominator_only = 0,
     log_denominator_vals = log_denominator_vals
->>>>>>> 2ec0b26 (Completion of coding for the "dsgm" function)
   )
 
   parameters <- list(
@@ -354,15 +315,9 @@ dsgm_fit_tmb <- function(y_prev, intensity_data, D, coords, ID_coords,
   # Stage 1: Gradient only
   if(messages) message("Stage 1: Optimization with gradient...")
 
-<<<<<<< HEAD
-  opt1 <- nlminb(obj$par, obj$fn, obj$gr,
-                 control = list(eval.max = 500, iter.max = 250,
-                                trace = ifelse(messages, 1, 0)))
-=======
   opt <- nlminb(obj$par, obj$fn, obj$gr,
                 control = list(eval.max = 500, iter.max = 250,
                                trace = ifelse(messages, 1, 0)))
->>>>>>> 2ec0b26 (Completion of coding for the "dsgm" function)
 
   # Standard errors
   if(messages) message("Computing standard errors...")
