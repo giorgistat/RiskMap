@@ -2221,71 +2221,206 @@ Laplace_sampling_MCMC <- function(y, units_m, mu, Sigma,
   class(out_sim) <- "mcmc.RiskMap"
   out_sim
 }
-
 ##' Set Control Parameters for Simulation
 ##'
-##' This function sets control parameters for running simulations, particularly for MCMC methods.
-##' It allows users to specify the number of simulations, burn-in period, thinning interval, and various
-##' other parameters necessary for the simulation.
+##' This function sets control parameters for running simulations, supporting both MCMC methods
+##' (for glgpm, dast models) and STAN sampling (for dsgm models).
 ##'
 ##' @param n_sim Integer. The total number of simulations to run. Default is 12000.
-##' @param burnin Integer. The number of initial simulations to discard (burn-in period, used for the MCMC algorithm). Default is 2000.
-##' @param thin Integer. The interval at which simulations are recorded (thinning interval, used for the MCMC algorithm). Default is 10.
-##' @param h Numeric. An optional parameter. Must be non-negative if specified.
-##' @param c1.h Numeric. A control parameter for the simulation. Must be positive. Default is 0.01.
-##' @param c2.h Numeric. Another control parameter for the simulation. Must be between 0 and 1. Default is 1e-04.
-##' @param linear_model Logical. If TRUE, the function sets up parameters for a linear model and
-##' only returns \code{n_sim}. Default is FALSE.
+##' @param burnin Integer. The number of initial simulations to discard (burn-in/warmup period). Default is 2000.
+##' @param thin Integer. The interval at which simulations are recorded (thinning interval, MCMC only). Default is 10.
+##' @param h Numeric. An optional parameter for Langevin MCMC. Must be non-negative if specified.
+##' @param c1.h Numeric. A control parameter for Langevin MCMC. Must be positive. Default is 0.01.
+##' @param c2.h Numeric. Another control parameter for Langevin MCMC. Must be between 0 and 1. Default is 1e-04.
+##' @param linear_model Logical. If TRUE, sets up parameters for a linear model. Default is FALSE.
+##' @param sampler Character. Type of sampler: "mcmc" for Langevin MCMC (default) or "stan" for STAN sampling.
+##' @param n_chains Integer. Number of MCMC chains (STAN only). Default is 1.
+##' @param n_cores Integer. Number of cores for parallel chains (STAN only). Default is 1.
+##' @param adapt_delta Numeric. Target acceptance rate for STAN (between 0 and 1). Default is 0.8.
+##' @param max_treedepth Integer. Maximum tree depth for STAN's NUTS sampler. Default is 10.
 ##'
 ##' @details
-##' The function validates the input parameters and ensures they are appropriate for the simulation that is used
-##' in the \code{\link{glgpm}} fitting function.
-##' For non-linear models, it checks that \code{n_sim} is greater than \code{burnin}, that \code{thin} is positive
-##' and a divisor of \code{(n_sim - burnin)}, and that \code{h}, \code{c1.h}, and \code{c2.h} are within their
-##' respective valid ranges.
+##' The function validates input parameters and ensures they are appropriate for the specified sampler.
 ##'
-##' If \code{linear_model} is TRUE, only \code{n_sim} and \code{linear_model} are required, and the function
-##' returns a list containing these parameters.
+##' For \code{sampler = "mcmc"} (Langevin MCMC used in glgpm, dast):
+##' - Validates \code{n_sim}, \code{burnin}, \code{thin}, \code{h}, \code{c1.h}, \code{c2.h}
+##' - Returns parameters for Langevin-based MCMC sampling
 ##'
-##' If \code{linear_model} is FALSE, the function returns a list containing \code{n_sim}, \code{burnin}, \code{thin},
-##' \code{h}, \code{c1.h}, \code{c2.h}, and \code{linear_model}.
+##' For \code{sampler = "stan"} (STAN sampling used in dsgm):
+##' - Validates \code{n_sim} (n_samples), \code{burnin} (n_warmup), \code{n_chains}, \code{n_cores}
+##' - Validates \code{adapt_delta} and \code{max_treedepth}
+##' - Ignores \code{thin}, \code{h}, \code{c1.h}, \code{c2.h} (not used by STAN)
 ##'
-##' @return A list of control parameters for the simulation with class attribute "mcmc.RiskMap".
+##' If \code{linear_model = TRUE}, only \code{n_sim} is required regardless of sampler.
+##'
+##' @return A list of control parameters with class "mcmc.RiskMap". Contents depend on \code{sampler}:
+##' \itemize{
+##'   \item For "mcmc": n_sim, burnin, thin, h, c1.h, c2.h, linear_model, sampler
+##'   \item For "stan": n_sim, burnin (as n_warmup), n_chains, n_cores, adapt_delta,
+##'         max_treedepth, linear_model, sampler
+##' }
 ##'
 ##' @examples
-##' # Example with default parameters
-##' control_params <- set_control_sim()
+##' # Default parameters (MCMC)
+##' control_mcmc <- set_control_sim()
 ##'
-##' # Example with custom parameters
-##' control_params <- set_control_sim(n_sim = 15000, burnin = 3000, thin = 20)
+##' # Custom MCMC parameters
+##' control_mcmc <- set_control_sim(n_sim = 15000, burnin = 3000, thin = 20)
 ##'
-##' @seealso \code{\link[Matrix]{Matrix}}, \code{\link[Matrix]{forceSymmetric}}
+##' # STAN parameters for DSGM
+##' control_stan <- set_control_sim(
+##'   sampler = "stan",
+##'   n_sim = 1000,
+##'   burnin = 1000,
+##'   n_chains = 4,
+##'   n_cores = 4,
+##'   adapt_delta = 0.85
+##' )
+##'
+##' @seealso \code{\link{glgpm}}, \code{\link{dast}}, \code{\link{dsgm}}
 ##' @author Emanuele Giorgi \email{e.giorgi@@lancaster.ac.uk}
 ##' @author Claudio Fronterre \email{c.fronterr@@lancaster.ac.uk}
 ##' @importFrom Matrix Matrix forceSymmetric
 ##' @export
-set_control_sim <- function (n_sim  = 12000, burnin = 2000, thin = 10, h = NULL, c1.h = 0.01, c2.h = 1e-04,
-                             linear_model = FALSE)
-{
+set_control_sim <- function(n_sim = 12000,
+                            burnin = 2000,
+                            thin = 10,
+                            h = NULL,
+                            c1.h = 0.01,
+                            c2.h = 1e-04,
+                            linear_model = FALSE,
+                            sampler = c("mcmc", "stan"),
+                            n_chains = 1,
+                            n_cores = 1,
+                            adapt_delta = 0.8,
+                            max_treedepth = 10) {
 
-  if (!linear_model & n_sim < burnin)
-    stop("n_sim cannot be smaller than burnin.")
-  if (!linear_model & thin <= 0)
-    stop("thin must be positive")
-  if (!linear_model & (n_sim - burnin)%%thin != 0)
-    stop("thin must be a divisor of (n_sim-burnin)")
-  if (!linear_model & !is.null(h) && h < 0)
-    stop("h must be positive.")
-  if (!linear_model & c1.h < 0)
-    stop("c1.h must be positive.")
-  if (!linear_model & (c2.h < 0 | c2.h > 1))
-    stop("c2.h must be between 0 and 1.")
-  if(linear_model) {
-    res <- list(n_sim = n_sim, linear_model = linear_model)
-  } else {
-    res <- list(n_sim = n_sim, burnin = burnin, thin = thin,
-                h = h, c1.h = c1.h, c2.h = c2.h, linear_model = linear_model)
+  # Match sampler argument
+  sampler <- match.arg(sampler)
+
+  # =============================================================================
+  # LINEAR MODEL (simple case for both samplers)
+  # =============================================================================
+
+  if (linear_model) {
+    res <- list(
+      n_sim = n_sim,
+      linear_model = linear_model,
+      sampler = sampler
+    )
+    class(res) <- "mcmc.RiskMap"
+    return(res)
   }
+
+  # =============================================================================
+  # MCMC SAMPLER (Langevin for glgpm, dast)
+  # =============================================================================
+
+  if (sampler == "mcmc") {
+
+    # Validate MCMC parameters
+    if (n_sim < burnin) {
+      stop("n_sim cannot be smaller than burnin.")
+    }
+
+    if (thin <= 0) {
+      stop("thin must be positive")
+    }
+
+    if ((n_sim - burnin) %% thin != 0) {
+      stop("thin must be a divisor of (n_sim - burnin)")
+    }
+
+    if (!is.null(h) && h < 0) {
+      stop("h must be non-negative.")
+    }
+
+    if (c1.h <= 0) {
+      stop("c1.h must be positive.")
+    }
+
+    if (c2.h < 0 | c2.h > 1) {
+      stop("c2.h must be between 0 and 1.")
+    }
+
+    res <- list(
+      n_sim = n_sim,
+      burnin = burnin,
+      thin = thin,
+      h = h,
+      c1.h = c1.h,
+      c2.h = c2.h,
+      linear_model = FALSE,
+      sampler = "mcmc"
+    )
+
+  }
+
+  # =============================================================================
+  # STAN SAMPLER (for DSGM)
+  # =============================================================================
+
+  if (sampler == "stan") {
+
+    # Validate STAN parameters
+    if (n_sim <= 0) {
+      stop("n_sim (number of samples) must be positive.")
+    }
+
+    if (burnin < 0) {
+      stop("burnin (warmup) must be non-negative.")
+    }
+
+    if (n_chains <= 0) {
+      stop("n_chains must be positive.")
+    }
+
+    if (n_cores <= 0) {
+      stop("n_cores must be positive.")
+    }
+
+    if (n_cores > n_chains) {
+      warning("n_cores is greater than n_chains. Setting n_cores = n_chains.")
+      n_cores <- n_chains
+    }
+
+    if (adapt_delta <= 0 | adapt_delta >= 1) {
+      stop("adapt_delta must be between 0 and 1.")
+    }
+
+    if (max_treedepth <= 0 | max_treedepth != round(max_treedepth)) {
+      stop("max_treedepth must be a positive integer.")
+    }
+
+    # STAN doesn't use thin, h, c1.h, c2.h
+    if (!missing(thin) && thin != 10) {
+      warning("'thin' parameter is ignored for STAN sampler.")
+    }
+
+    if (!is.null(h)) {
+      warning("'h' parameter is ignored for STAN sampler.")
+    }
+
+    if (c1.h != 0.01) {
+      warning("'c1.h' parameter is ignored for STAN sampler.")
+    }
+
+    if (c2.h != 1e-04) {
+      warning("'c2.h' parameter is ignored for STAN sampler.")
+    }
+
+    res <- list(
+      n_sim = n_sim,           # Number of post-warmup samples per chain
+      burnin = burnin,         # Warmup samples (equivalent to n_warmup)
+      n_chains = n_chains,     # Number of chains
+      n_cores = n_cores,       # Number of cores for parallel sampling
+      adapt_delta = adapt_delta,      # Target acceptance rate
+      max_treedepth = max_treedepth,  # Maximum tree depth
+      linear_model = FALSE,
+      sampler = "stan"
+    )
+  }
+
   class(res) <- "mcmc.RiskMap"
   return(res)
 }

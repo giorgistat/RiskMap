@@ -4,11 +4,11 @@
 ##' @title Prediction of the random effects components and covariates effects over a spatial grid using a fitted generalized linear Gaussian process model
 ##'
 ##' @description This function computes predictions over a spatial grid using a fitted model
-##' obtained from the \code{\link{glgpm}} function. It provides point predictions and uncertainty
+##' obtained from the \code{\link{glgpm}} or \code{\link{dsgm}} function. It provides point predictions and uncertainty
 ##' estimates for the specified locations for each component of the model separately: the spatial random effects;
 ##' the unstructured random effects (if included); and the covariates effects.
 ##'
-##' @param object A RiskMap object obtained from the `glgpm` function.
+##' @param object A RiskMap object obtained from the `glgpm` or `dsgm` function.
 ##' @param grid_pred An object of class 'sfc', representing the spatial grid over which predictions
 ##'                 are to be made. Must be in the same coordinate reference system (CRS) as the
 ##'                 object passed to 'object'.
@@ -27,8 +27,6 @@
 ##' @author Claudio Fronterre \email{c.fronterr@@lancaster.ac.uk}
 ##' @importFrom Matrix solve
 ##' @export
-##'
-
 pred_over_grid <- function(object,
                            grid_pred = NULL,
                            predictors = NULL,
@@ -40,7 +38,7 @@ pred_over_grid <- function(object,
 
   # Check if grid_pred is a list of sfc POINT geometries
   list_mode <- is.list(grid_pred) && !is.null(grid_pred) &
-               !any(class(grid_pred)=="sf" | class(grid_pred)=="sfc")
+    !any(class(grid_pred)=="sf" | class(grid_pred)=="sfc")
 
   if (list_mode) {
 
@@ -389,12 +387,66 @@ pred_over_grid <- function(object,
   } else {
     nu2 <- par_hat$tau2/par_hat$sigma2
   }
-  if(nu2==0) nu2 <- 10e-10
+  if(object$family == "intprev" || nu2==0) nu2 <- 10e-10
 
   diag(R) <- diag(R)+nu2
 
   dast_model <- !is.null(object$power_val)
+
   if(object$family!="gaussian") {
+    # =========================================================================
+    # NON-GAUSSIAN MODELS (DAST or regular)
+    # =========================================================================
+
+
+    if(object$family=="intprev") {
+      if (messages) {
+        message("Sampling spatial process for DSGM model using STAN...")
+      }
+
+      # Determine number of samples based on control_sim
+      if (control_sim$sampler == "stan") {
+        n_samples <- control_sim$n_sim
+        n_warmup <- control_sim$burnin
+        n_chains <- control_sim$n_chains
+        n_cores <- control_sim$n_cores
+      } else {
+        n_samples <- (control_sim$n_sim - control_sim$burnin) / control_sim$thin
+        n_warmup <- 1000
+        n_chains <- 1
+        n_cores <- 1
+      }
+
+      # Sample spatial process at observed locations using STAN
+      S_samples_obj <- sample_spatial_process_stan(
+        y_prev = object$prevalence_data,
+        intensity_data = object$intensity_data,
+        D = object$D,
+        coords = object$coords,
+        ID_coords = object$ID_coords,
+        int_mat = object$int_mat,
+        survey_times_data = object$survey_times_data,
+        mda_times = object$mda_times,
+        par = list(
+          beta = par_hat$beta,
+          k = par_hat$k,
+          rho = par_hat$rho,
+          alpha_W = par_hat$alpha_W,
+          gamma_W = par_hat$gamma_W,
+          sigma2 = par_hat$sigma2,
+          phi = par_hat$phi
+        ),
+        n_samples = n_samples,
+        n_warmup = n_warmup,
+        n_chains = n_chains,
+        n_cores = n_cores,
+        messages = messages
+      )
+
+      simulation <- list()
+      simulation$samples <- list()
+      simulation$samples$S <- S_samples_obj$S_samples
+    }
 
     Sigma <- par_hat$sigma2*R
     Sigma_inv <- solve(Sigma)
@@ -423,7 +475,7 @@ pred_over_grid <- function(object,
                                    ID_coords = object$ID_coords, ID_re = object$ID_re,
                                    control_mcmc = control_sim,
                                    messages = messages)
-    } else {
+    } else if(object$family != "intprev") {
       simulation <-
         Laplace_sampling_MCMC(y = object$y, units_m = object$units_m, mu = mu, Sigma = Sigma,
                               sigma2_re = par_hat$sigma2_re, invlink = object$linkf,
@@ -435,7 +487,7 @@ pred_over_grid <- function(object,
     if(!obs_loc) {
       if (list_mode) {
         mu_cond_S <- lapply(seq_along(A), function(i) {
-          A[[i]] %*% t(simulation$samples$S)
+          A[[i]] %*% simulation$samples$S
         })
       } else {
         mu_cond_S <- A %*% t(simulation$samples$S)
@@ -508,6 +560,9 @@ pred_over_grid <- function(object,
       }
     }
   } else {
+    # =========================================================================
+    # GAUSSIAN MODEL
+    # =========================================================================
 
     if(!is.null(object$fix_var_me) && object$fix_var_me>0 ||
        is.null(object$fix_var_me)) {
@@ -653,7 +708,7 @@ pred_over_grid <- function(object,
   } else {
     out$re <- list(D_pred = NULL, samples = NULL)
   }
-  if(dast_model) {
+  if(dast_model | object$family == "intprev") {
     out$mda_times <- object$mda_times
     if(is.null(par_hat$alpha)) out$fix_alpha <- object$fix_alpha
     out$power_val <- object$power_val
@@ -674,17 +729,16 @@ pred_over_grid <- function(object,
 ##' @title Predictive Target Over a Regular Spatial Grid
 ##'
 ##' @description Computes predictions over a regular spatial grid using outputs from the
-##' \code{\link{pred_over_grid}} function.
-##' This function allows for incorporating covariates, offsets, MDA effects, and optional
-##' unstructured random effects into the predictive target.
+##' \code{\link{pred_over_grid}} function. For DSGM models, this combines spatial random effects,
+##' covariate effects, and MDA impacts to produce prevalence and intensity predictions.
 ##'
 ##' @param object Output from `pred_over_grid`, a RiskMap.pred.re object.
 ##' @param include_covariates Logical. Include covariates in the predictive target.
 ##' @param include_nugget Logical. Include the nugget effect in the predictive target.
 ##' @param include_cov_offset Logical. Include the covariate offset in the predictive target.
-##' @param include_mda_effect Logical. Include the MDA effect in the predictive target using a DAST model; see \code{\link{dast}}.
-##' @param mda_grid Optional. Grid of MDA coverage values required for predictions using a DAST model; see \code{\link{dast}}.
-##' @param time_pred Optional. Time point for prediction required for predictions using a DAST model; see \code{\link{dast}}.
+##' @param include_mda_effect Logical. Include the MDA effect in the predictive target.
+##' @param mda_grid Optional. Grid of MDA coverage values (n_pred x n_mda_times).
+##' @param time_pred Optional. Time point(s) for prediction (scalar or vector of length n_pred).
 ##' @param include_re Logical. Include unstructured random effects in the predictive target.
 ##' @param f_target Optional. List of functions to apply on the linear predictor samples.
 ##' @param pd_summary Optional. List of summary functions to apply on the predicted values.
@@ -697,29 +751,34 @@ pred_over_grid <- function(object,
 ##' @importFrom Matrix solve
 ##' @export
 pred_target_grid <- function(object,
-                        include_covariates = TRUE,
-                        include_nugget = FALSE,
-                        include_cov_offset = FALSE,
-                        include_mda_effect = TRUE,
-                        mda_grid = NULL,
-                        time_pred = NULL,
-                        include_re = FALSE,
-                        f_target = NULL,
-                        pd_summary = NULL) {
-  if(!inherits(object,
-               what = "RiskMap.pred.re", which = FALSE)) {
-    stop("The object passed to 'object' must be an output of
-         the function 'pred_over_grid'")
+                             include_covariates = TRUE,
+                             include_nugget = FALSE,
+                             include_cov_offset = FALSE,
+                             include_mda_effect = TRUE,
+                             mda_grid = NULL,
+                             time_pred = NULL,
+                             include_re = FALSE,
+                             f_target = NULL,
+                             pd_summary = NULL) {
+
+  if(!inherits(object, what = "RiskMap.pred.re", which = FALSE)) {
+    stop("The object passed to 'object' must be an output of the function 'pred_over_grid'")
   }
 
-  dast_model <- !is.null(object$par_hat$gamma)
+  # =============================================================================
+  # DETERMINE MODEL TYPE
+  # =============================================================================
 
-  if(dast_model) {
-    if(include_mda_effect & is.null(mda_grid)) {
+  dast_model <- !is.null(object$par_hat$gamma)
+  dsgm_model <- !is.null(object$family) && object$family == "intprev"
+
+  # Both DAST and DSGM require time_pred if using MDA
+  if((dast_model || dsgm_model) && include_mda_effect) {
+    if(is.null(mda_grid)) {
       stop("The MDA coverage must be specified for each point on the grid through the argument 'mda_grid'")
     }
     if(is.null(time_pred)) {
-      stop("For a DAST model, the time of prediction must be specified through the argument 'time_pred'")
+      stop("For a DAST or DSGM model, the time of prediction must be specified through the argument 'time_pred'")
     }
   }
 
@@ -729,9 +788,9 @@ pred_target_grid <- function(object,
   if (list_mode) {
     n_pred <- vapply(object$grid_pred, function(g) nrow(sf::st_coordinates(g)), integer(1))
 
-    if (dast_model && include_mda_effect) {
+    if ((dast_model || dsgm_model) && include_mda_effect) {
       if (is.null(mda_grid)) {
-        stop("With DAST and include_mda_effect = TRUE, 'mda_grid' must be provided (as a list matching 'object$grid_pred').")
+        stop("With DAST/DSGM and include_mda_effect = TRUE, 'mda_grid' must be provided (as a list matching 'object$grid_pred').")
       }
       if (!is.list(mda_grid)) {
         stop("When 'object$grid_pred' is a list, 'mda_grid' must also be a list (one element per group).")
@@ -753,19 +812,55 @@ pred_target_grid <- function(object,
     n_pred <- nrow(object$S_samples)
   }
 
-
-  if(is.null(object$par_hat$tau2) &
-     include_nugget) {
+  if(is.null(object$par_hat$tau2) && include_nugget) {
     stop("The nugget cannot be included in the predictive target
              because it was not included when fitting the model")
   }
 
+  # =============================================================================
+  # SET DEFAULT TRANSFORMATIONS FOR DSGM
+  # =============================================================================
+
   if(is.null(f_target)) {
-    f_target <- list(linear_target = function(x) x)
+    if(dsgm_model) {
+      # DSGM-specific transformations
+      k <- object$par_hat$k
+      rho <- object$par_hat$rho
+
+      f_target <- list(
+        prevalence = function(lp) {
+          mu_W <- exp(lp)
+          prev <- 1 - (k / (k + mu_W * (1 - exp(-rho))))^k
+          prev[prev < 1e-10] <- 1e-10
+          prev[prev > 1 - 1e-10] <- 1 - 1e-10
+          return(prev)
+        },
+        mu_W = function(lp) {
+          exp(lp)
+        },
+        intensity = function(lp) {
+          mu_W <- exp(lp)
+          prev <- 1 - (k / (k + mu_W * (1 - exp(-rho))))^k
+          prev[prev < 1e-10] <- 1e-10
+          mu_C <- (rho * mu_W) / prev
+          mu_C[prev < 1e-10] <- 0
+          return(mu_C)
+        }
+      )
+    } else {
+      # Default: identity on linear predictor
+      f_target <- list(linear_target = function(x) x)
+    }
   }
 
   if(is.null(pd_summary)) {
-    pd_summary <- list(mean = mean, sd = sd)
+    pd_summary <- list(
+      mean = mean,
+      median = median,
+      sd = sd,
+      lower = function(x) quantile(x, 0.025),
+      upper = function(x) quantile(x, 0.975)
+    )
   }
 
   n_summaries <- length(pd_summary)
@@ -780,14 +875,13 @@ pred_target_grid <- function(object,
   re_names <- names(object$re$samples)
 
   out <- list()
-  if(length(object$mu_pred)==1 && object$mu_pred==0 &&
-     include_covariates) {
+
+  if(length(object$mu_pred)==1 && object$mu_pred==0 && include_covariates) {
     stop("Covariates have not been provided; re-run pred_over_grid
          and provide the covariates through the argument 'predictors'")
   }
 
-  if(n_re==0 &&
-     include_re) {
+  if(n_re==0 && include_re) {
     stop("The categories of the randome effects variables have not been provided;
          re-run pred_over_grid and provide the covariates through the argument 're_predictors'")
   }
@@ -799,11 +893,12 @@ pred_target_grid <- function(object,
       mu_target <- 0
     }
   } else {
-
-    if(is.null(object$mu_pred)) stop("the output obtained from 'pred_S' does not
-                                     contain any covariates; if including covariates
-                                     in the predictive target these shuold be included
-                                     when running 'pred_S'")
+    if(is.null(object$mu_pred)) {
+      stop("the output obtained from 'pred_over_grid' does not
+           contain any covariates; if including covariates
+           in the predictive target these should be included
+           when running 'pred_over_grid'")
+    }
     mu_target <- object$mu_pred
   }
 
@@ -836,6 +931,10 @@ pred_target_grid <- function(object,
       object$S_samples <- object$S_samples + Z_sim
     }
   }
+
+  # =============================================================================
+  # BUILD LINEAR PREDICTOR SAMPLES
+  # =============================================================================
 
   if (list_mode) {
     object$S_samples <- lapply(object$S_samples, function(x) {
@@ -879,7 +978,6 @@ pred_target_grid <- function(object,
     }
   }
 
-
   if(include_re) {
     n_dim_re <- sapply(1:n_re, function(i) length(object$re$samples[[i]]))
 
@@ -887,19 +985,76 @@ pred_target_grid <- function(object,
       for(j in 1:n_dim_re[i]) {
         for(h in 1:n_samples) {
           out$lp_samples[,h] <- out$lp_samples[,h] +
-          object$re$D_pred[[i]][,j]*object$re$samples[[i]][[j]][h]
+            object$re$D_pred[[i]][,j]*object$re$samples[[i]][[j]][h]
         }
       }
     }
   }
 
+  # =============================================================================
+  # APPLY MDA EFFECT (DAST OR DSGM)
+  # =============================================================================
+
+  if((dast_model || dsgm_model) && include_mda_effect) {
+
+    alpha <- object$par_hat$alpha
+    if(is.null(alpha)) alpha <- object$fix_alpha
+    gamma <- object$par_hat$gamma
+
+    if(dsgm_model) {
+      # DSGM uses gamma_W for worm burden decay
+      # Linear decay (kappa = 1)
+      kappa_mda <- 1
+    } else {
+      # DAST uses specified power
+      kappa_mda <- object$power_val
+    }
+
+    if (list_mode) {
+      for (i in seq_along(object$grid_pred)) {
+        mda_effect_time_pred <- compute_mda_effect(
+          rep(time_pred, n_pred[i]),
+          mda_times = object$mda_times,
+          intervention = mda_grid[[i]],
+          alpha = alpha,
+          gamma = gamma,
+          kappa = kappa_mda
+        )
+        # Apply MDA effect to linear predictor
+        # For DSGM: lp is log(mu_W*), so exp(lp) * mda = mu_W
+        # For DAST: lp is log(lambda*), so exp(lp) * mda = lambda
+        out$lp_samples[[i]] <- out$lp_samples[[i]] + log(mda_effect_time_pred)
+      }
+    } else {
+      mda_effect_time_pred <- compute_mda_effect(
+        rep(time_pred, n_pred),
+        mda_times = object$mda_times,
+        intervention = mda_grid,
+        alpha = alpha,
+        gamma = gamma,
+        kappa = kappa_mda
+      )
+      # Apply MDA effect to linear predictor
+      out$lp_samples <- out$lp_samples + log(mda_effect_time_pred[ID_coords])
+    }
+  }
+
+  # =============================================================================
+  # APPLY TRANSFORMATIONS AND COMPUTE SUMMARIES
+  # =============================================================================
+
   names_f <- names(f_target)
   if(is.null(names_f)) names_f <- paste("f_target_",1:length(f_target), sep = "")
 
   names_s <- names(pd_summary)
-  if(is.null(pd_summary)) names_s <- paste("pd_summary_",1:length(f_target), sep = "")
+  if(is.null(names_s)) names_s <- paste("pd_summary_",1:length(pd_summary), sep = "")
 
   out$target <- list()
+
+  # Store raw samples for DSGM
+  if(dsgm_model) {
+    out$samples <- list()
+  }
 
   if (list_mode) {
     group_names <- names(object$grid_pred)
@@ -911,53 +1066,53 @@ pred_target_grid <- function(object,
       out$target[[group_names[i]]] <- list()
       for (k in 1:n_f) {
         target_samples_i <- f_target[[k]](out$lp_samples[[i]])
-        if(dast_model && include_mda_effect) {
-          alpha <- object$par_hat$alpha
-          if(is.null(alpha)) alpha <- object$fix_alpha
-          gamma <- object$par_hat$gamma
-          mda_effect_time_pred <- compute_mda_effect(rep(time_pred, n_pred[i]),
-                                                     mda_times = object$mda_times,
-                                                     intervention = mda_grid[[i]],
-                                                     alpha = alpha,
-                                                     gamma = gamma,
-                                                     kappa = object$power_val)
-          target_samples_i <- target_samples_i * mda_effect_time_pred
-        }
+
         out$target[[group_names[i]]][[paste(names_f[k])]] <- list()
         for (j in 1:n_summaries) {
           out$target[[group_names[i]]][[paste(names_f[k])]][[paste(names_s[j])]] <-
             apply(target_samples_i, 1, pd_summary[[j]])
         }
+
+        # Store samples for DSGM
+        if(dsgm_model) {
+          out$samples[[group_names[i]]][[paste(names_f[k])]] <- target_samples_i
+        }
       }
     }
   } else {
     for(i in 1:n_f) {
-      target_samples_i <-
-        f_target[[i]](out$lp_samples)
-      if(dast_model && include_mda_effect) {
-        alpha <- object$par_hat$alpha
-        if(is.null(alpha)) alpha <- object$fix_alpha
-        gamma <- object$par_hat$gamma
-        mda_effect_time_pred <- compute_mda_effect(rep(time_pred, n_pred),
-                                                   mda_times = object$mda_times,
-                                                   mda_grid, alpha = alpha,
-                                                   gamma = gamma, kappa = object$power_val)
-        target_samples_i <- target_samples_i*mda_effect_time_pred[ID_coords]
+      target_samples_i <- f_target[[i]](out$lp_samples)
 
-      }
       out$target[[paste(names_f[i])]] <- list()
       for(j in 1:n_summaries) {
         out$target[[paste(names_f[i])]][[paste(names_s[j])]] <-
           apply(target_samples_i, 1, pd_summary[[j]])
       }
+
+      # Store samples for DSGM
+      if(dsgm_model) {
+        out$samples[[paste(names_f[i])]] <- target_samples_i
+      }
     }
   }
+
   out$grid_pred <- object$grid_pred
   out$f_target <- names(f_target)
   out$pd_summary <- names(pd_summary)
+
+  # Add DSGM/DAST metadata
+  if(dsgm_model || dast_model) {
+    out$mda_effect_applied <- include_mda_effect
+    out$time_pred <- time_pred
+    if(include_mda_effect) {
+      out$mda_grid <- mda_grid
+    }
+  }
+
   class(out) <- "RiskMap_pred_target_grid"
   return(out)
 }
+
 
 ##' Plot Method for RiskMap_pred_target_grid Objects
 ##'
@@ -2794,3 +2949,4 @@ print.summary.RiskMap.sim.res <- function(x, ...) {
 
   invisible(x)
 }
+

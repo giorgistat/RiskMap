@@ -608,8 +608,7 @@ dsgm_initial_value <- function(y_prev, intensity_data, D, coords, ID_coords,
 
   # Initialize spatial variance
   if(is.null(start_pars$sigma2)) {
-    sigma2_init <- var(resid_by_loc, na.rm = TRUE)
-    sigma2_init <- max(sigma2_init, 1e-4)
+    sigma2_init <- 1
   } else {
     sigma2_init <- start_pars$sigma2
   }
@@ -1601,6 +1600,8 @@ dsgm <- function(formula,
   # =============================================================================
 
   res <- list()
+  res$kappa <- 0.5
+  res$fixed_
   res$prevalence_data <- y_prev
   res$intensity_data <- intensity_data
   res$egg_counts <- egg_counts
