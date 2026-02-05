@@ -4,20 +4,43 @@
 detect_stan_backend <- function(messages = TRUE) {
   # Try rstan first (preferred for compatibility)
   if (requireNamespace("rstan", quietly = TRUE)) {
-    # Test if rstan's stanc compiler works
-    test_code <- "data { int N; } parameters { real mu; } model { }"
+    # Test if rstan's stanc compiler works WITH vector syntax
+    # (the DSGM model uses vector[2] which triggers the HPC bug)
+    test_code <- "
+    functions {
+      vector test_func() {
+        vector[2] result;
+        result[1] = 1.0;
+        result[2] = 2.0;
+        return result;
+      }
+    }
+    data {
+      int N;
+    }
+    parameters {
+      real mu;
+    }
+    model {
+    }
+    "
 
     tryCatch({
       suppressMessages(
-        test_model <- rstan::stan_model(model_code = test_code,
-                                        model_name = "test",
-                                        verbose = FALSE)
+        suppressWarnings(
+          test_model <- rstan::stan_model(
+            model_code = test_code,
+            model_name = "test_backend",
+            verbose = FALSE
+          )
+        )
       )
-      if (messages) message("Using rstan backend")
+      if (messages) message("Using rstan backend (tested successfully)")
       return("rstan")
     }, error = function(e) {
       if (messages) {
-        message("rstan compilation failed, trying cmdstanr...")
+        message("rstan compilation failed (stanc error detected)")
+        message("Falling back to cmdstanr...")
       }
     })
   }
