@@ -1,12 +1,12 @@
 functions {
   // Compute prevalence from mean worm burden
   real compute_prevalence(real mu_W, real k, real rho) {
-    real term = k / (k + mu_W * (1 - exp(-rho)));
-    real pr = 1 - pow(term, k);
+    real term = k / (k + mu_W * (1.0 - exp( -rho )));
+    real pr = 1.0 - pow(term, k);
 
     // Clamp prevalence
     if (pr < 1e-10) pr = 1e-10;
-    if (pr > 1 - 1e-10) pr = 1 - 1e-10;
+    if (pr > 1.0 - 1e-10) pr = 1.0 - 1e-10;
 
     return pr;
   }
@@ -18,8 +18,8 @@ functions {
 
   // Compute conditional variance
   real compute_sigma2_C(real mu_W, real pr, real k, real rho) {
-    real var1 = (rho * mu_W * (1 + rho)) / pr;
-    real var2 = (square(rho) * square(mu_W) / pr) * (1.0/k + 1 - 1.0/pr);
+    real var1 = (rho * mu_W * (1.0+ rho)) / pr;
+    real var2 = (square(rho) * square(mu_W) / pr) * (1.0/k + 1.0 - 1.0/pr);
     real result = var1 + var2;
 
     // Safeguard against numerical issues
@@ -42,8 +42,8 @@ functions {
     // kappa = (mu_C - 1)^2 / sigma2_C (shape)
     // lambda = (mu_C - 1) / sigma2_C (RATE, not scale!)
     // Note: STAN's gamma_lpdf uses (shape, rate) parameterization
-    params[1] = square(mu_C - 1) / sigma2_C;  // kappa (shape)
-    params[2] = (mu_C - 1) / sigma2_C;         // lambda (rate = 1/theta)
+    params[1] = square(mu_C - 1.0) / sigma2_C;  // kappa (shape)
+    params[2] = (mu_C - 1.0) / sigma2_C;         // lambda (rate = 1/theta)
 
     return params;
   }
@@ -125,7 +125,7 @@ model {
   // Likelihood for zeros
   for (i in 1:n) {
     if (y[i] == 0) {
-      target += log(1 - pr0[i]);
+      target += log(1.0 - pr0[i]);
     }
   }
 
@@ -144,7 +144,7 @@ model {
 
     // C - 1 ~ Gamma(kappa, lambda) where lambda is RATE
     if (gamma_params[1] > 0 && gamma_params[2] > 0) {
-      target += gamma_lpdf(C_pos[i] - 1 | gamma_params[1], gamma_params[2]);
+      target += gamma_lpdf(C_pos[i] - 1.0 | gamma_params[1], gamma_params[2]);
     }
   }
 }
