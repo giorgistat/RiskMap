@@ -56,12 +56,12 @@ data {
   int<lower=1> p;              // Number of covariates
 
   // Response data
-  int<lower=0, upper=1> y[n];  // Binary infection indicator
+  array[n] int<lower=0, upper=1> y;  // Binary infection indicator
   vector<lower=1>[n_pos] C_pos; // Egg counts for positives
-  int<lower=1, upper=n> pos_idx[n_pos]; // Indices of positives
+  array[n_pos] int<lower=1, upper=n> pos_idx; // Indices of positives
 
   // Location mapping
-  int<lower=1, upper=n_loc> ID_coords[n];
+  array[n] int<lower=1, upper=n_loc> ID_coords;
 
   // Distance matrix
   matrix[n_loc, n_loc] D_mat;
@@ -148,4 +148,3 @@ model {
     }
   }
 }
-
