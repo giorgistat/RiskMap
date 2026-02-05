@@ -134,6 +134,9 @@ Type objective_function<Type>::operator() ()
 
   vector<Type> log_f_vals(n_samples);
 
+  vector<Type> mu = D * beta + cov_offset;
+  Type k_term = Type(1.0) - exp(-rho);
+
   for(int s = 0; s < n_samples; s++) {
     vector<Type> S = S_samples.row(s);
 
@@ -141,7 +144,6 @@ Type objective_function<Type>::operator() ()
     // COMPUTE NUMERATOR: log f(y | S, θ) + log f(S | θ)
     // =========================================================================
 
-    vector<Type> mu = D * beta + cov_offset;
     vector<Type> eta(n);
     for(int i = 0; i < n; i++) {
       eta(i) = mu(i) + S(ID_coords(i));
@@ -150,7 +152,6 @@ Type objective_function<Type>::operator() ()
     vector<Type> mu_W = mu_W_star * mda_effect;
 
     // Prevalence via PGF
-    Type k_term = Type(1.0) - exp(-rho);
     vector<Type> denom = k + mu_W * k_term;
     vector<Type> ratio = k / denom;
     vector<Type> pr = Type(1.0) - pow(ratio, k);
