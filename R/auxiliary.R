@@ -374,7 +374,7 @@ interpret.formula <- function(formula) {
 ##' \item{sigma2_re}{A vector of variance estimates for the random effects, if applicable.}
 ##' For DSGM models (joint prevalence-intensity):
 ##' \item{beta}{A vector of coefficient estimates for mean worm burden.}
-##' \item{k}{The negative binomial aggregation parameter.}
+##' \item{k}{The negative binomial overdispersion parameter.}
 ##' \item{rho}{The egg detection rate (fecundity).}
 ##' \item{alpha_W}{The immediate worm burden reduction (if estimated).}
 ##' \item{gamma_W}{The decay rate of MDA effect (if estimated).}
@@ -776,7 +776,7 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
     k_upper <- exp(log(k_est) + qnorm(1 - alpha / 2) * k_se / k_est)
 
     k_matrix <- rbind(
-      "Aggregation param. (k)" = c(k_est, k_lower, k_upper)
+      "Overdispersion param." = c(k_est, k_lower, k_upper)
     )
     colnames(k_matrix) <- c("Estimate", "Lower limit", "Upper limit")
     res$overdispersion <- k_matrix
@@ -807,15 +807,6 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
     res$cov_offset_used <- !is.null(object$cov_offset) && !all(object$cov_offset == 0)
     res$call <- object$call %||% NULL
     res$is_dsgm <- TRUE
-
-    # Compute AIC
-    n_params <- p + 5  # beta, k, rho, sigma2, phi
-    if(is.null(object$fix_alpha_W)) n_params <- n_params + 1
-    if(is.null(object$fix_gamma_W)) n_params <- n_params + 1
-
-    if(!is.na(res$log.lik)) {
-      res$aic <- 2 * n_params - 2 * res$log.lik
-    }
 
     class(res) <- "summary.RiskMap"
     return(res)
@@ -1053,7 +1044,7 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
 ##'   \item Unstructured random effects variances, if applicable.
 ##'   \item For DSGM: overdispersion parameter, fecundity rate, and MDA impact parameters.
 ##'   \item Log-likelihood of the model.
-##'   \item Akaike Information Criterion (AIC) for Gaussian models and DSGM.
+##'   \item Akaike Information Criterion (AIC) for Gaussian models.
 ##' }
 ##' @return This function is used for its side effect of printing to the console. It does not return a value.
 ##' @author Emanuele Giorgi \email{e.giorgi@@lancaster.ac.uk}
@@ -1097,7 +1088,7 @@ print.summary.RiskMap <- function(x, ...) {
     # 3. MDA impact function parameters
     # -------------------------------------------------------------------------
     cat("\nMDA impact on worm burden\n")
-    cat("f(t) = (1 - alpha_W * coverage * exp(-t/gamma_W))\n")
+    cat("f(t) = (1 - alpha_W * exp(-t/gamma_W))\n")
 
     if(!is.null(x$mda_par)) {
       printCoefmat(x$mda_par, Pvalues = FALSE)
@@ -1111,25 +1102,16 @@ print.summary.RiskMap <- function(x, ...) {
     }
 
     # -------------------------------------------------------------------------
-    # 4. Overdispersion parameter
+    # 4. Overdispersion parameter and fecundity rate
     # -------------------------------------------------------------------------
 
-    cat("\n Negative binomial parameter for worm burden distribution\n")
-    printCoefmat(x$overdispersion, Pvalues = FALSE)
-
-    # -------------------------------------------------------------------------
-    # 5. Fecundity rate
-    # -------------------------------------------------------------------------
-    cat("Other parameters \n")
-    printCoefmat(x$fecundity, Pvalues = FALSE)
+    cat("\nNegative binomial parameter for worm burden distribution\n")
+    printCoefmat(rbind(x$overdispersion,x$fecundity), Pvalues = FALSE)
 
     # -------------------------------------------------------------------------
     # Model fit statistics
     # -------------------------------------------------------------------------
     cat("\nLog-likelihood: ", x$log.lik, "\n", sep = "")
-    if(!is.null(x$aic) && !is.na(x$aic)) {
-      cat("AIC: ", x$aic, "\n", sep = "")
-    }
 
     return(invisible(x))
   }

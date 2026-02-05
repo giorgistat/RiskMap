@@ -768,9 +768,16 @@ pred_target_grid <- function(object,
   # =============================================================================
   # DETERMINE MODEL TYPE
   # =============================================================================
-
-  dast_model <- !is.null(object$par_hat$gamma)
+  # Check DSGM first (more specific)
   dsgm_model <- !is.null(object$family) && object$family == "intprev"
+
+  # DAST only if NOT DSGM
+  dast_model <- !dsgm_model && !is.null(object$par_hat$gamma)
+
+  # Debug output
+  if(include_mda_effect) {
+    message(sprintf("Model type: DSGM=%s, DAST=%s", dsgm_model, dast_model))
+  }
 
   # Both DAST and DSGM require time_pred if using MDA
   if((dast_model || dsgm_model) && include_mda_effect) {
@@ -790,7 +797,7 @@ pred_target_grid <- function(object,
 
     if ((dast_model || dsgm_model) && include_mda_effect) {
       if (is.null(mda_grid)) {
-        stop("With DAST/DSGM and include_mda_effect = TRUE, 'mda_grid' must be provided (as a list matching 'object$grid_pred').")
+        stop("With DAST/DSGM and include_mda_effect = TRUE, 'mda_grid' must be provided.")
       }
       if (!is.list(mda_grid)) {
         stop("When 'object$grid_pred' is a list, 'mda_grid' must also be a list (one element per group).")
@@ -803,8 +810,7 @@ pred_target_grid <- function(object,
           stop(sprintf("'mda_grid[[%d]]' must be a matrix or data.frame.", i))
         }
         if (nrow(mda_grid[[i]]) != n_pred[i]) {
-          stop(sprintf("Rows of 'mda_grid[[%d]]' (%d) must equal number of locations in 'object$grid_pred[[%d]]' (%d).",
-                       i, nrow(mda_grid[[i]]), i, n_pred[i]))
+          stop(sprintf("Rows of 'mda_grid[[%d]]' must equal locations in 'object$grid_pred[[%d]]'.", i, i))
         }
       }
     }
@@ -814,7 +820,7 @@ pred_target_grid <- function(object,
 
   if(is.null(object$par_hat$tau2) && include_nugget) {
     stop("The nugget cannot be included in the predictive target
-             because it was not included when fitting the model")
+         because it was not included when fitting the model")
   }
 
   # =============================================================================
@@ -840,10 +846,7 @@ pred_target_grid <- function(object,
         },
         intensity = function(lp) {
           mu_W <- exp(lp)
-          prev <- 1 - (k / (k + mu_W * (1 - exp(-rho))))^k
-          prev[prev < 1e-10] <- 1e-10
-          mu_C <- (rho * mu_W) / prev
-          mu_C[prev < 1e-10] <- 0
+          mu_C <- rho * mu_W
           return(mu_C)
         }
       )
@@ -865,6 +868,7 @@ pred_target_grid <- function(object,
 
   n_summaries <- length(pd_summary)
   n_f <- length(f_target)
+
   if (list_mode) {
     n_samples <- ncol(object$S_samples[[1]])
   } else {
@@ -872,7 +876,6 @@ pred_target_grid <- function(object,
   }
 
   n_re <- length(object$re$samples)
-  re_names <- names(object$re$samples)
 
   out <- list()
 
@@ -882,7 +885,7 @@ pred_target_grid <- function(object,
   }
 
   if(n_re==0 && include_re) {
-    stop("The categories of the randome effects variables have not been provided;
+    stop("The categories of the random effects variables have not been provided;
          re-run pred_over_grid and provide the covariates through the argument 're_predictors'")
   }
 
@@ -894,10 +897,7 @@ pred_target_grid <- function(object,
     }
   } else {
     if(is.null(object$mu_pred)) {
-      stop("the output obtained from 'pred_over_grid' does not
-           contain any covariates; if including covariates
-           in the predictive target these should be included
-           when running 'pred_over_grid'")
+      stop("the output obtained from 'pred_over_grid' does not contain any covariates")
     }
     mu_target <- object$mu_pred
   }
@@ -910,9 +910,7 @@ pred_target_grid <- function(object,
     }
   } else {
     if(length(object$cov_offset)==1) {
-      stop("No covariate offset was included in the model;
-           set include_cov_offset = FALSE, or refit the model and include
-           the covariate offset")
+      stop("No covariate offset was included in the model")
     }
     cov_offset <- object$cov_offset
   }
@@ -925,8 +923,7 @@ pred_target_grid <- function(object,
         object$S_samples[[i]] + Z_sim
       })
     } else {
-      Z_sim <- matrix(rnorm(n_samples * n_pred,
-                            sd = sqrt(object$par_hat$tau2)),
+      Z_sim <- matrix(rnorm(n_samples * n_pred, sd = sqrt(object$par_hat$tau2)),
                       ncol = n_samples)
       object$S_samples <- object$S_samples + Z_sim
     }
@@ -965,6 +962,7 @@ pred_target_grid <- function(object,
     } else {
       ID_coords <- 1:n_pred
     }
+
     if(is.matrix(mu_target)) {
       out$lp_samples <- sapply(1:n_samples,
                                function(i)
@@ -992,50 +990,41 @@ pred_target_grid <- function(object,
   }
 
   # =============================================================================
-  # APPLY MDA EFFECT (DAST OR DSGM)
+  # APPLY MDA EFFECT TO LINEAR PREDICTOR (DSGM ONLY)
   # =============================================================================
 
-  if((dast_model || dsgm_model) && include_mda_effect) {
+  if(dsgm_model && include_mda_effect) {
+    alpha <- object$par_hat$alpha_W
+    if(is.null(alpha)) alpha <- object$fix_alpha_W
+    gamma <- object$par_hat$gamma_W
+    if(is.null(gamma)) gamma <- object$fix_gamma_W
 
-    alpha <- object$par_hat$alpha
-    if(is.null(alpha)) alpha <- object$fix_alpha
-    gamma <- object$par_hat$gamma
-
-    if(dsgm_model) {
-      # DSGM uses gamma_W for worm burden decay
-      # Linear decay (kappa = 1)
-      kappa_mda <- 1
-    } else {
-      # DAST uses specified power
-      kappa_mda <- object$power_val
-    }
-
+    # DSGM: MDA affects mu_W, so apply to linear predictor
+    # lp = log(mu_W*), we want log(mu_W) = log(mu_W* * mda_effect)
     if (list_mode) {
       for (i in seq_along(object$grid_pred)) {
-        mda_effect_time_pred <- compute_mda_effect(
+        mda_effect_vals <- compute_mda_effect(
           rep(time_pred, n_pred[i]),
           mda_times = object$mda_times,
           intervention = mda_grid[[i]],
           alpha = alpha,
           gamma = gamma,
-          kappa = kappa_mda
+          kappa = 1  # Linear decay for worm burden
         )
-        # Apply MDA effect to linear predictor
-        # For DSGM: lp is log(mu_W*), so exp(lp) * mda = mu_W
-        # For DAST: lp is log(lambda*), so exp(lp) * mda = lambda
-        out$lp_samples[[i]] <- out$lp_samples[[i]] + log(mda_effect_time_pred)
+        # Apply to linear predictor: add log(mda_effect)
+        out$lp_samples[[i]] <- out$lp_samples[[i]] + log(mda_effect_vals)
       }
     } else {
-      mda_effect_time_pred <- compute_mda_effect(
+      mda_effect_vals <- compute_mda_effect(
         rep(time_pred, n_pred),
         mda_times = object$mda_times,
         intervention = mda_grid,
         alpha = alpha,
         gamma = gamma,
-        kappa = kappa_mda
+        kappa = 1  # Linear decay for worm burden
       )
-      # Apply MDA effect to linear predictor
-      out$lp_samples <- out$lp_samples + log(mda_effect_time_pred[ID_coords])
+      # Apply to linear predictor
+      out$lp_samples <- out$lp_samples + log(mda_effect_vals[ID_coords])
     }
   }
 
@@ -1044,10 +1033,10 @@ pred_target_grid <- function(object,
   # =============================================================================
 
   names_f <- names(f_target)
-  if(is.null(names_f)) names_f <- paste("f_target_",1:length(f_target), sep = "")
+  if(is.null(names_f)) names_f <- paste("f_target_", 1:length(f_target), sep = "")
 
   names_s <- names(pd_summary)
-  if(is.null(names_s)) names_s <- paste("pd_summary_",1:length(pd_summary), sep = "")
+  if(is.null(names_s)) names_s <- paste("pd_summary_", 1:length(pd_summary), sep = "")
 
   out$target <- list()
 
@@ -1064,9 +1053,31 @@ pred_target_grid <- function(object,
 
     for (i in seq_along(object$grid_pred)) {
       out$target[[group_names[i]]] <- list()
+      if(dsgm_model) out$samples[[group_names[i]]] <- list()
+
       for (k in 1:n_f) {
+        # Apply transformation to get target samples
         target_samples_i <- f_target[[k]](out$lp_samples[[i]])
 
+        # DAST: Apply MDA AFTER transformation (multiply prevalence by MDA effect)
+        if(dast_model && include_mda_effect) {
+          alpha <- object$par_hat$alpha
+          if(is.null(alpha)) alpha <- object$fix_alpha
+          gamma <- object$par_hat$gamma
+
+          mda_effect_time_pred <- compute_mda_effect(
+            rep(time_pred, n_pred[i]),
+            mda_times = object$mda_times,
+            intervention = mda_grid[[i]],
+            alpha = alpha,
+            gamma = gamma,
+            kappa = object$power_val
+          )
+          # Multiply transformed value by MDA effect
+          target_samples_i <- target_samples_i * mda_effect_time_pred
+        }
+
+        # Compute summaries
         out$target[[group_names[i]]][[paste(names_f[k])]] <- list()
         for (j in 1:n_summaries) {
           out$target[[group_names[i]]][[paste(names_f[k])]][[paste(names_s[j])]] <-
@@ -1081,8 +1092,28 @@ pred_target_grid <- function(object,
     }
   } else {
     for(i in 1:n_f) {
+      # Apply transformation
       target_samples_i <- f_target[[i]](out$lp_samples)
 
+      # DAST: Apply MDA AFTER transformation
+      if(dast_model && include_mda_effect) {
+        alpha <- object$par_hat$alpha
+        if(is.null(alpha)) alpha <- object$fix_alpha
+        gamma <- object$par_hat$gamma
+
+        mda_effect_time_pred <- compute_mda_effect(
+          rep(time_pred, n_pred),
+          mda_times = object$mda_times,
+          intervention = mda_grid,
+          alpha = alpha,
+          gamma = gamma,
+          kappa = object$power_val
+        )
+        # Multiply transformed value by MDA effect
+        target_samples_i <- target_samples_i * mda_effect_time_pred[ID_coords]
+      }
+
+      # Compute summaries
       out$target[[paste(names_f[i])]] <- list()
       for(j in 1:n_summaries) {
         out$target[[paste(names_f[i])]][[paste(names_s[j])]] <-
@@ -1100,7 +1131,7 @@ pred_target_grid <- function(object,
   out$f_target <- names(f_target)
   out$pd_summary <- names(pd_summary)
 
-  # Add DSGM/DAST metadata
+  # Add metadata
   if(dsgm_model || dast_model) {
     out$mda_effect_applied <- include_mda_effect
     out$time_pred <- time_pred
