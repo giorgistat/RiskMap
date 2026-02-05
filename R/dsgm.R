@@ -1,34 +1,87 @@
+##' @title Detect working Stan backend
+##' @description Tests rstan first, falls back to cmdstanr if rstan is broken
 ##' @keywords internal
-get_stan_model <- function(messages = TRUE) {
+detect_stan_backend <- function(messages = TRUE) {
+  # Try rstan first (preferred for compatibility)
+  if (requireNamespace("rstan", quietly = TRUE)) {
+    # Test if rstan's stanc compiler works
+    test_code <- "data { int N; } parameters { real mu; } model { }"
 
-  # Return cached model if available
-  if (!is.null(.dsgm_cache$stan_model)) {
+    tryCatch({
+      suppressMessages(
+        test_model <- rstan::stan_model(model_code = test_code,
+                                        model_name = "test",
+                                        verbose = FALSE)
+      )
+      if (messages) message("Using rstan backend")
+      return("rstan")
+    }, error = function(e) {
+      if (messages) {
+        message("rstan compilation failed, trying cmdstanr...")
+      }
+    })
+  }
+
+  # Fall back to cmdstanr
+  if (requireNamespace("cmdstanr", quietly = TRUE)) {
+    if (messages) message("Using cmdstanr backend")
+    return("cmdstanr")
+  }
+
+  stop("Neither rstan nor cmdstanr is available or working")
+}
+
+##' @keywords internal
+get_stan_model <- function(backend = NULL, messages = TRUE) {
+  # Auto-detect backend if not specified
+  if (is.null(backend)) {
+    backend <- detect_stan_backend(messages = messages)
+  }
+
+  # Return cached model if available and same backend
+  if (!is.null(.dsgm_cache$stan_model) &&
+      !is.null(.dsgm_cache$backend) &&
+      .dsgm_cache$backend == backend) {
     if(messages) message("Using cached STAN model")
-    return(.dsgm_cache$stan_model)
+    return(list(model = .dsgm_cache$stan_model, backend = backend))
   }
 
   if(messages) message("Compiling STAN model (first use in this session)...")
 
-  # Read the STAN code from the package
   stan_file <- system.file("stan/dsgm_spatial.stan", package = "RiskMap")
-
   if (!file.exists(stan_file)) {
     stop("STAN model file not found in package")
   }
 
-  # Compile and cache
-  .dsgm_cache$stan_model <- rstan::stan_model(
-    file = stan_file,
-    model_name = "dsgm_spatial",
-    verbose = FALSE,
-    auto_write = TRUE
-  )
+  if (backend == "rstan") {
+    if(!requireNamespace("rstan", quietly = TRUE)) {
+      stop("Package 'rstan' is required but not available")
+    }
+
+    .dsgm_cache$stan_model <- rstan::stan_model(
+      file = stan_file,
+      model_name = "dsgm_spatial",
+      verbose = FALSE,
+      auto_write = TRUE
+    )
+  } else if (backend == "cmdstanr") {
+    if(!requireNamespace("cmdstanr", quietly = TRUE)) {
+      stop("Package 'cmdstanr' is required but not available")
+    }
+
+    .dsgm_cache$stan_model <- cmdstanr::cmdstan_model(
+      stan_file = stan_file,
+      compile = TRUE
+    )
+  } else {
+    stop("Invalid backend: must be 'rstan' or 'cmdstanr'")
+  }
+
+  .dsgm_cache$backend <- backend
 
   if(messages) message("STAN model compiled and cached")
-
-  return(.dsgm_cache$stan_model)
+  return(list(model = .dsgm_cache$stan_model, backend = backend))
 }
-
 
 ##' @title Sample spatial process using STAN
 ##' @description Uses STAN to sample S(x) from posterior given fixed parameters
@@ -65,57 +118,32 @@ sample_spatial_process_stan <- function(y_prev,
                                         n_cores = 4,
                                         adapt_delta = 0.8,
                                         max_treedepth = 10,
+                                        backend = NULL,
                                         messages = TRUE) {
 
-  if(!requireNamespace("rstan", quietly = TRUE)) {
-    stop("Package 'rstan' is required for this function")
-  }
-
-  # =============================================================================
-  # PREPARE DATA FOR STAN
-  # =============================================================================
-
+  # [ALL DATA PREPARATION CODE STAYS THE SAME]
   n <- length(y_prev)
   n_loc <- nrow(coords)
   p <- ncol(D)
-
-  # Compute distance matrix
   dist_mat <- as.matrix(dist(coords))
-
-  # Compute MDA impact
   mda_impact <- compute_mda_effect(survey_times_data, mda_times, int_mat,
                                    par$alpha_W, par$gamma_W, kappa = 1)
-
-  # Linear predictor (without spatial effect)
   eta_fixed <- as.numeric(D %*% par$beta)
-
-  # Extract positives
   pos_idx <- which(y_prev == 1)
   n_pos <- length(pos_idx)
 
-  # Create STAN data list
   stan_data <- list(
     n = n,
     n_loc = n_loc,
     n_pos = n_pos,
     p = p,
-
-    # Response data
     y = y_prev,
     C_pos = intensity_data,
     pos_idx = pos_idx,
-
-    # Location mapping
     ID_coords = ID_coords,
-
-    # Distance matrix
     D_mat = dist_mat,
-
-    # Fixed effects
     eta_fixed = eta_fixed,
     mda_impact = mda_impact,
-
-    # Fixed parameters
     k = par$k,
     rho = par$rho,
     sigma2 = par$sigma2,
@@ -126,8 +154,10 @@ sample_spatial_process_stan <- function(y_prev,
     message("Loading pre-compiled STAN model...")
   }
 
-  # Get the model that was compiled at package installation
-  stan_model <- get_stan_model()
+  # Get model and backend
+  model_obj <- get_stan_model(backend = backend, messages = FALSE)
+  stan_model <- model_obj$model
+  backend <- model_obj$backend
 
   if(messages) {
     message(sprintf("Sampling %d iterations (%d warmup) across %d chains...",
@@ -135,66 +165,92 @@ sample_spatial_process_stan <- function(y_prev,
   }
 
   # =============================================================================
-  # SAMPLE
+  # SAMPLE - BACKEND-SPECIFIC
   # =============================================================================
+  if (backend == "rstan") {
+    fit <- rstan::sampling(
+      stan_model,
+      data = stan_data,
+      iter = n_samples + n_warmup,
+      warmup = n_warmup,
+      chains = n_chains,
+      cores = n_cores,
+      control = list(
+        adapt_delta = adapt_delta,
+        max_treedepth = max_treedepth
+      ),
+      refresh = ifelse(messages, max(1, (n_samples + n_warmup) %/% 10), 0),
+      show_messages = messages,
+      verbose = messages
+    )
 
-  fit <- rstan::sampling(
-    stan_model,
-    data = stan_data,
-    iter = n_samples + n_warmup,
-    warmup = n_warmup,
-    chains = n_chains,
-    cores = n_cores,
-    control = list(
+    # Extract samples - rstan version
+    S_samples <- rstan::extract(fit, pars = "S")$S
+
+    if(messages) {
+      message(sprintf("Extracted %d samples of spatial process (%d locations)",
+                      nrow(S_samples), ncol(S_samples)))
+
+      summary_S <- rstan::summary(fit, pars = "S")$summary
+      n_divergent <- sum(rstan::get_num_divergent(fit))
+      n_max_treedepth <- sum(rstan::get_num_max_treedepth(fit))
+
+      message(sprintf("Divergent transitions: %d", n_divergent))
+      message(sprintf("Max treedepth hits: %d", n_max_treedepth))
+
+      if(n_divergent > 0) {
+        warning("Divergent transitions detected. Consider increasing adapt_delta.")
+      }
+    }
+
+  } else if (backend == "cmdstanr") {
+    fit <- stan_model$sample(
+      data = stan_data,
+      iter_warmup = n_warmup,
+      iter_sampling = n_samples,
+      chains = n_chains,
+      parallel_chains = n_cores,
       adapt_delta = adapt_delta,
-      max_treedepth = max_treedepth
-    ),
-    refresh = ifelse(messages, max(1, (n_samples + n_warmup) %/% 10), 0),
-    show_messages = messages,
-    verbose = messages
-  )
+      max_treedepth = max_treedepth,
+      refresh = ifelse(messages, max(1, (n_samples + n_warmup) %/% 10), 0),
+      show_messages = messages,
+      show_exceptions = messages
+    )
 
-  # =============================================================================
-  # EXTRACT SAMPLES
-  # =============================================================================
+    # Extract samples - cmdstanr version
+    S_samples <- fit$draws("S", format = "matrix")
 
-  # Extract S samples (spatial process at each location)
-  S_samples <- rstan::extract(fit, pars = "S")$S
+    if(messages) {
+      message(sprintf("Extracted %d samples of spatial process (%d locations)",
+                      nrow(S_samples), ncol(S_samples)))
 
-  # S_samples is now (n_samples_total x n_loc) where n_samples_total = n_samples * n_chains
+      diagnostics <- fit$diagnostic_summary()
+      n_divergent <- sum(diagnostics$num_divergent)
+      n_max_treedepth <- sum(diagnostics$num_max_treedepth)
 
-  if(messages) {
-    message(sprintf("Extracted %d samples of spatial process (%d locations)",
-                    nrow(S_samples), ncol(S_samples)))
+      message(sprintf("Divergent transitions: %d", n_divergent))
+      message(sprintf("Max treedepth hits: %d", n_max_treedepth))
 
-    # Diagnostics
-    summary_S <- rstan::summary(fit, pars = "S")$summary
-    n_divergent <- rstan::get_num_divergent(fit)
-    n_max_treedepth <- rstan::get_num_max_treedepth(fit)
-
-    message(sprintf("Divergent transitions: %d", sum(n_divergent)))
-    message(sprintf("Max treedepth hits: %d", sum(n_max_treedepth)))
-
-    if(sum(n_divergent) > 0) {
-      warning("Divergent transitions detected. Consider increasing adapt_delta.")
+      if(n_divergent > 0) {
+        warning("Divergent transitions detected. Consider increasing adapt_delta.")
+      }
     }
   }
 
   # =============================================================================
-  # RETURN RESULTS
+  # RETURN RESULTS (same for both backends)
   # =============================================================================
-
   result <- list(
-    S_samples = S_samples,           # Matrix: n_samples_total x n_loc
-    stan_fit = fit,                  # Full STAN fit object
+    S_samples = S_samples,
+    stan_fit = fit,
     n_samples = nrow(S_samples),
     n_loc = n_loc,
     coords = coords,
-    par = par
+    par = par,
+    backend = backend  # Store which backend was used
   )
 
   class(result) <- "dsgm_spatial_samples"
-
   return(result)
 }
 
@@ -1252,6 +1308,7 @@ dsgm <- function(formula,
                  adapt_delta = 0.8,
                  max_treedepth = 10,
                  return_samples = TRUE,
+                 backend = NULL,
                  messages = TRUE,
                  start_pars = list(beta = NULL,
                                    k = NULL,
@@ -1562,6 +1619,7 @@ dsgm <- function(formula,
     n_cores = 1,
     adapt_delta = adapt_delta,
     max_treedepth = max_treedepth,
+    backend = backend,  # ADD THIS
     messages = messages
   )
 
