@@ -36,78 +36,9 @@ dsgm(
 )
 }
 \arguments{
-\item{formula}{Model formula. Requires a spatial GP term: \code{gp(x,y)} or \code{gp(sf)}.}
-
-\item{data}{A \code{data.frame} or \code{sf} object.}
-
-\item{model}{\code{"sth"} (default) or \code{"lf_mdiag"}.}
-
 \item{intensity_family}{Distribution for C | C > 0 (STH model only).
-\code{"gamma"} (default) uses a shifted Gamma; \code{"negbin"} uses a
-zero-truncated negative binomial. Both are moment-matched to
-the conditional mean and variance derived from the NegBin-Poisson hierarchy.}
-
-\item{time}{Column in \code{data} giving survey time per observation (required for STH).}
-
-\item{mda_times}{Numeric vector of MDA round times.}
-
-\item{int_mat}{Coverage matrix (n x n_mda).}
-
-\item{den}{Column in \code{data} with binomial denominator (LF only).}
-
-\item{gamma_sens}{Fixed serological sensitivity in (0,1]; default 0.97 (LF only).}
-
-\item{fix_k}{Fix the NB aggregation parameter k; \code{NULL} to estimate (LF only).}
-
-\item{use_mda}{Logical; include MDA decay. Defaults to \code{TRUE} when \code{mda_times} supplied.}
-
-\item{penalty}{Optional list of penalty functions for MDA parameters.}
-
-\item{drop_W}{Fixed value for the immediate worm reduction alpha_W (\code{NULL} to estimate).}
-
-\item{decay_W}{Fixed value for the worm recovery rate gamma_W (\code{NULL} to estimate).}
-
-\item{crs}{Optional CRS for spatial data.}
-
-\item{convert_to_crs}{CRS to project data to before fitting.}
-
-\item{scale_to_km}{Scale coordinates to km (default \code{TRUE}).}
-
-\item{par0}{Optional named list of initial parameter values.}
-
-\item{n_samples}{Number of Stan MCMC samples (default 1000).}
-
-\item{n_warmup}{Number of Stan warmup iterations (default 1000).}
-
-\item{n_chains}{Number of Stan chains (default 1).}
-
-\item{adapt_delta}{Target Stan acceptance rate (default 0.8).}
-
-\item{max_treedepth}{Stan tree depth limit (default 10).}
-
-\item{return_samples}{Include spatial samples in result (default \code{TRUE}).}
-
-\item{backend}{Stan backend: \code{"rstan"}, \code{"cmdstanr"}, or \code{NULL} (auto-detect).}
-
-\item{messages}{Print progress messages (default \code{TRUE}).}
-
-\item{start_pars}{Named list of starting values for auto-initialisation.}
-}
-\value{
-An object of class \code{"RiskMap"}.
+\code{"gamma"} (default) = shifted Gamma; \code{"negbin"} = zero-truncated NegBin.}
 }
 \description{
-Fits a doubly stochastic geostatistical model using Monte Carlo Maximum
-Likelihood (MCML). Two model families are supported via \code{model}:
-
-\describe{
-  \item{\code{"sth"}}{Joint prevalence-intensity model for
-    soil-transmitted helminths. The response is an egg count (EPG);
-    zeros indicate uninfected individuals.}
-  \item{\code{"lf_mdiag"}}{Joint model for two diagnostic outcomes for
-    lymphatic filariasis.}
-}
-}
-\seealso{
-\code{\link{dast}}
+Fit a Doubly Stochastic Geostatistical Model (DSGM)
 }

@@ -621,6 +621,1174 @@ dast <- function(formula,
 }
 
 
+##' Simulation from Decay-adjusted Spatio-temporal (DAST) models
+##'
+##' Simulates data from a fitted DAST model object (output from \code{dast})
+##' or from user-specified DAST parameters.
+##'
+##' @param n_sim Number of simulations.
+##' @param model_fit Optional fitted DAST model object of class \code{RiskMap}.
+##' If supplied, it overrides model specification arguments.
+##' @param formula Model formula including a \code{gp()} term.
+##' @param data Data frame or \code{sf} object used for simulation.
+##' @param den Binomial denominator variable. If missing, it is assumed to be 1.
+##' @param time Survey-time information. For simulations from scratch this can be a
+##' column in \code{data} (unquoted name or character string) or a numeric vector
+##' of length \code{nrow(data)}.
+##' @param mda_times Vector of MDA times.
+##' @param int_mat Intervention matrix (n x length(mda_times)) with coverage values.
+##' @param power_val Power value for the MDA impact function.
+##' @param cov_offset Optional offset for the linear predictor.
+##' @param crs Coordinate reference system (CRS) code.
+##' @param convert_to_crs Optional CRS to transform coordinates to before simulation.
+##' @param scale_to_km Logical; if TRUE distances are computed in kilometers.
+##' @param sim_pars List of simulation parameters. Used only when \code{model_fit}
+##' is \code{NULL}. Includes \code{beta}, \code{sigma2}, \code{tau2}, \code{phi},
+##' \code{psi}, \code{sigma2_re}, \code{alpha}, and \code{gamma}.
+##' @param messages Logical; if TRUE print progress messages.
+##'
+##' @return A list with simulated outcomes in \code{data_sim} as an
+##' \code{n x n_sim} matrix (rows are observations, columns are simulations),
+##' simulated latent components and parameter values used for simulation.
+##' @export
+dast_sim <- function(n_sim,
+                     model_fit = NULL,
+                     formula = NULL,
+                     data = NULL,
+                     den = NULL,
+                     time = NULL,
+                     mda_times = NULL,
+                     int_mat = NULL,
+                     power_val = NULL,
+                     cov_offset = NULL,
+                     crs = NULL,
+                     convert_to_crs = NULL,
+                     scale_to_km = TRUE,
+                     sim_pars = list(beta = NULL,
+                                     sigma2 = NULL,
+                                     tau2 = NULL,
+                                     phi = NULL,
+                                     psi = NULL,
+                                     sigma2_re = NULL,
+                                     alpha = NULL,
+                                     gamma = NULL),
+                     messages = TRUE) {
+
+  if (!is.null(model_fit)) {
+    if (!inherits(model_fit, what = "RiskMap", which = FALSE)) {
+      stop("'model_fit' must be of class 'RiskMap'")
+    }
+    if (is.null(model_fit$power_val)) {
+      stop("'model_fit' does not look like an output from 'dast'")
+    }
+    formula <- as.formula(model_fit$formula)
+    data <- model_fit$data_sf
+    crs <- model_fit$crs
+    convert_to_crs <- model_fit$convert_to_crs
+    scale_to_km <- model_fit$scale_to_km
+    power_val <- model_fit$power_val
+    mda_times <- model_fit$mda_times
+    int_mat <- model_fit$int_mat
+    time <- model_fit$survey_times_data
+  }
+
+  if (!inherits(formula, what = "formula", which = FALSE)) {
+    stop("'formula' must be a 'formula'\n         object indicating the variables of the\n         model to be fitted")
+  }
+
+  inter_f <- interpret.formula(formula)
+  gp_terms <- inter_f$gp.spec$term
+  gp_dim <- inter_f$gp.spec$dim
+
+  # Survey time and optional GP time index
+  sst <- FALSE
+  gp_time_obs <- NULL
+
+  if (is.null(model_fit)) {
+    time_name <- deparse(substitute(time))
+    if (time_name != "NULL" && time_name %in% names(data)) {
+      survey_times_data <- data[[time_name]]
+    } else if (is.character(time) && length(time) == 1 && time %in% names(data)) {
+      survey_times_data <- data[[time]]
+    } else if (length(time) == nrow(data)) {
+      survey_times_data <- as.numeric(time)
+    } else {
+      stop("You must supply survey times through `time` as a column in 'data' or as a numeric vector of length nrow(data).")
+    }
+  } else {
+    survey_times_data <- as.numeric(time)
+  }
+
+  if (length(gp_terms) == 1 && gp_terms[1] == "sf") {
+    sst <- FALSE
+  } else if (gp_dim == 3) {
+    sst <- TRUE
+    gp_time_obs <- data[[gp_terms[3]]]
+  } else if (gp_dim == 2) {
+    sst <- FALSE
+  } else {
+    stop("Specify gp(x, y), gp(x, y, t), or gp(sf).")
+  }
+
+  if(length(crs)>0) {
+    if (is.character(crs) && length(crs) == 1) {
+      crs_chr <- trimws(crs)
+      if (grepl("^EPSG:[0-9]+$", crs_chr, ignore.case = TRUE)) {
+        crs_chr <- sub("^EPSG:", "", crs_chr, ignore.case = TRUE)
+      }
+      if (grepl("^[0-9]+$", crs_chr)) {
+        crs <- as.numeric(crs_chr)
+      } else {
+        stop("'crs' must be a positive integer number or a string like 'EPSG:<code>'")
+      }
+    }
+    if(!is.numeric(crs) |
+       (is.numeric(crs) &
+          (crs%%1!=0 | crs <0))) stop("'crs' must be a positive integer number")
+  }
+  if(class(data)[1]=="data.frame") {
+    if(is.null(crs)) {
+      warning("'crs' is set to 4326 (long/lat)")
+      crs <- 4326
+    }
+    if(length(gp_terms)>1 && gp_terms[1] != "sf") {
+      new_x <- paste(gp_terms[1],"_sf",sep="")
+      new_y <- paste(gp_terms[2],"_sf",sep="")
+      data[[new_x]] <-  data[[gp_terms[1]]]
+      data[[new_y]] <-  data[[gp_terms[2]]]
+      data <- sf::st_as_sf(data,
+                           coords = c(new_x, new_y),
+                           crs = crs)
+    }
+  }
+
+  if(length(gp_terms) == 1 & gp_terms[1]=="sf" &
+     class(data)[1]!="sf") stop("'data' must be an object of class 'sf'")
+
+  if(class(data)[1]=="sf") {
+    if(is.na(sf::st_crs(data)) & is.null(crs)) {
+      stop("the CRS of the sf object passed to 'data' is missing and and is not specified through 'crs'")
+    } else if(is.na(sf::st_crs(data))) {
+      data <- sf::st_as_sf(data, crs = crs)
+    }
+  }
+
+  kappa <- inter_f$gp.spec$kappa
+  if(kappa < 0) stop("kappa must be positive.")
+
+  mf <- model.frame(inter_f$pf,data=data, na.action = na.fail)
+  D <- as.matrix(model.matrix(attr(mf,"terms"),data=data))
+  n <- nrow(D)
+
+  if (is.null(cov_offset)) {
+    if (is.null(inter_f$offset)) {
+      cov_offset <- rep(0, n)
+    } else {
+      cov_offset <- data[[inter_f$offset]]
+    }
+  }
+
+  # denominator
+  if(!is.null(den)) {
+    do_name <- deparse(substitute(den))
+    if (do_name != "NULL") {
+      units_m <- data[[do_name]]
+    } else {
+      units_m <- den
+    }
+  } else if (!is.null(model_fit)) {
+    units_m <- model_fit$units_m
+  } else {
+    units_m <- rep(1, n)
+    warning("'den' is assumed to be 1 for all observations")
+  }
+  if(is.integer(units_m)) units_m <- as.numeric(units_m)
+  if(!is.numeric(units_m)) stop("the variable passed to `den` must be numeric")
+
+  if (length(survey_times_data) != n) {
+    stop("'time' must have length equal to the number of observations")
+  }
+  if (is.null(mda_times) || length(mda_times) < 1) {
+    stop("'mda_times' must be provided")
+  }
+  if (is.null(int_mat)) {
+    stop("'int_mat' must be provided")
+  }
+  int_mat <- as.matrix(int_mat)
+  if (nrow(int_mat) != n || ncol(int_mat) != length(mda_times)) {
+    stop("'int_mat' must have dimensions nrow(data) x length(mda_times)")
+  }
+  if (is.null(power_val)) stop("'power_val' must be provided")
+
+  if(length(inter_f$re.spec) > 0) {
+    hr_re <- inter_f$re.spec$term
+  } else {
+    hr_re <- NULL
+  }
+
+  if(!is.null(hr_re)) {
+    re_mf <- sf::st_drop_geometry(data[hr_re])
+    re_mf_n <- re_mf
+
+    if(any(is.na(re_mf))) stop("Missing values in the variable(s) of the random effects specified through re()")
+    names_re <- colnames(re_mf)
+    n_re <- ncol(re_mf)
+
+    ID_re <- matrix(NA, nrow = n, ncol = n_re)
+    re_unique <- list()
+    re_unique_f <- list()
+    for(i in 1:n_re) {
+      if(is.factor(re_mf[,i])) {
+        re_mf_n[,i] <- as.numeric(re_mf[,i])
+        re_unique[[names_re[i]]] <- 1:length(levels(re_mf[,i]))
+        ID_re[, i] <- sapply(1:n,
+                             function(j) which(re_mf_n[j,i]==re_unique[[names_re[i]]]))
+        re_unique_f[[names_re[i]]] <-levels(re_mf[,i])
+      } else if(is.numeric(re_mf[,i])) {
+        re_unique[[names_re[i]]] <- unique(re_mf[,i])
+        ID_re[, i] <- sapply(1:n,
+                             function(j) which(re_mf_n[j,i]==re_unique[[names_re[i]]]))
+        re_unique_f[[names_re[i]]] <- re_unique[[names_re[i]]]
+      }
+    }
+    ID_re <- data.frame(ID_re)
+    colnames(ID_re) <- names_re
+  } else {
+    n_re <- 0
+    re_unique <- NULL
+    ID_re <- NULL
+  }
+
+  if(!is.null(convert_to_crs)) {
+    if(!is.numeric(convert_to_crs)) stop("'convert_to_crs' must be a numeric object")
+    data <- sf::st_transform(data, crs = convert_to_crs)
+    crs <- convert_to_crs
+  }
+
+  if(messages) message("The CRS used is ", as.list(sf::st_crs(data))$input, "\n")
+
+  coords_o <- sf::st_coordinates(data)
+  if(sst) {
+    coords_time <- unique(cbind(coords_o, gp_time_obs))
+    coords <- coords_time[,1:2, drop = FALSE]
+    time_gp <- coords_time[,3]
+  } else {
+    coords <- unique(coords_o)
+    time_gp <- NULL
+  }
+
+  m <- nrow(coords_o)
+  if(sst) {
+    ID_coords <- sapply(1:m, function(i)
+      which(coords_o[i,1]==coords[,1] &
+              coords_o[i,2]==coords[,2] &
+              gp_time_obs[i]==time_gp))
+  } else {
+    ID_coords <- sapply(1:m, function(i)
+      which(coords_o[i,1]==coords[,1] &
+              coords_o[i,2]==coords[,2]))
+  }
+
+  if(scale_to_km) {
+    coords <- coords/1000
+    if(messages) message("Distances between locations are computed in kilometers \n")
+  } else {
+    if(messages) message("Distances between locations are computed in meters \n")
+  }
+
+  if (!is.null(model_fit)) {
+    par_hat <- coef(model_fit)
+    beta <- par_hat$beta
+    sigma2 <- par_hat$sigma2
+    phi <- par_hat$phi
+    if (is.null(model_fit$fix_tau2)) {
+      tau2 <- par_hat$tau2
+    } else {
+      tau2 <- model_fit$fix_tau2
+    }
+    if (is.null(model_fit$fix_alpha)) {
+      alpha <- par_hat$alpha
+    } else {
+      alpha <- model_fit$fix_alpha
+    }
+    gamma <- par_hat$gamma
+    if (sst) psi <- par_hat$psi
+    if(n_re > 0) sigma2_re <- par_hat$sigma2_re
+  } else {
+    beta <- sim_pars$beta
+    sigma2 <- sim_pars$sigma2
+    tau2 <- sim_pars$tau2
+    phi <- sim_pars$phi
+    alpha <- sim_pars$alpha
+    gamma <- sim_pars$gamma
+    psi <- sim_pars$psi
+    sigma2_re <- sim_pars$sigma2_re
+  }
+
+  if(is.null(beta)) stop("'beta' is missing")
+  if(length(beta)!=ncol(D)) stop("the number of values provided for 'beta' does not match the number of covariates")
+  if(is.null(sigma2)) stop("'sigma2' is missing")
+  if(is.null(phi)) stop("'phi' is missing")
+  if(is.null(tau2)) stop("'tau2' is missing")
+  if(is.null(alpha)) stop("'alpha' is missing")
+  if(is.null(gamma)) stop("'gamma' is missing")
+  if(sst && is.null(psi)) stop("'psi' is missing for spatio-temporal DAST simulations")
+  if(n_re>0) {
+    if(is.null(sigma2_re)) stop("'sigma2_re' is missing")
+    if(length(sigma2_re)!=n_re) stop("the values passed to 'sigma2_re' do not match the number of random effects")
+  }
+
+  if(sst) {
+    Sigma <- sigma2*matern_cor(dist(coords), phi = phi, kappa = kappa,
+                                                return_sym_matrix = TRUE) *
+      matern_cor(dist(time_gp), phi = psi, kappa = 0.5,
+                 return_sym_matrix = TRUE)
+  } else {
+    Sigma <- sigma2*matern_cor(dist(coords), phi = phi, kappa = kappa,
+                               return_sym_matrix = TRUE)
+  }
+  diag(Sigma) <- diag(Sigma) + tau2
+
+  Sigma_sroot <- t(chol(Sigma))
+  S_sim <- t(sapply(1:n_sim, function(i) Sigma_sroot %*% rnorm(nrow(coords))))
+
+  if(n_re > 0) {
+    re_names <- if(!is.null(model_fit)) names(model_fit$re) else inter_f$re.spec$term
+    dim_re <- sapply(1:n_re, function(j) length(re_unique[[j]]))
+    re_sim <- vector("list", n_sim)
+    for(i in 1:n_sim) {
+      re_sim[[i]] <- list()
+      for(j in 1:n_re) {
+        re_sim[[i]][[paste(re_names[j])]] <- rnorm(dim_re[j]) * sqrt(sigma2_re[j])
+      }
+    }
+  }
+
+  eta_sim <- t(sapply(1:n_sim, function(i) as.numeric(D %*% beta + cov_offset + S_sim[i,][ID_coords])))
+
+  if(n_re > 0) {
+    for(i in 1:n_sim) {
+      for(j in 1:n_re) {
+        eta_sim[i,] <- eta_sim[i,] + re_sim[[i]][[paste(re_names[j])]][ID_re[,j]]
+      }
+    }
+  }
+
+  mda_effect <- compute_mda_effect(survey_times_data = survey_times_data,
+                                   mda_times = mda_times,
+                                   intervention = int_mat,
+                                   alpha = alpha,
+                                   gamma = gamma,
+                                   kappa = power_val)
+
+  y_sim <- matrix(NA, nrow = n_sim, ncol = n)
+  for(i in 1:n_sim) {
+    prob_i <- stats::plogis(eta_sim[i,]) * mda_effect
+    prob_i <- pmax(0, pmin(prob_i, 1))
+    y_sim[i,] <- stats::rbinom(n = n, size = units_m, prob = prob_i)
+  }
+
+  data_sim <- t(y_sim)
+  response_name <- if (!is.null(inter_f$response) && nzchar(inter_f$response)) {
+    inter_f$response
+  } else {
+    "y"
+  }
+  colnames(data_sim) <- paste(response_name, "_sim", 1:n_sim, sep = "")
+
+  out <- list(data_sim = data_sim,
+              S_sim = S_sim,
+              lin_pred_sim = eta_sim,
+              mda_effect = mda_effect,
+              beta = beta,
+              sigma2 = sigma2,
+              tau2 = tau2,
+              phi = phi,
+              alpha = alpha,
+              gamma = gamma,
+              power_val = power_val,
+              units_m = units_m)
+  if (sst) out$psi <- psi
+  if (n_re > 0) {
+    out$sigma2_re <- sigma2_re
+    out$re_sim <- re_sim
+  }
+  return(out)
+}
+
+##' Internal Posterior Predictive Validation for DAST Fits
+##'
+##' Internal utility to validate DAST model fit quality by comparing observed
+##' outcomes to simulations generated from the fitted DAST data-generating process.
+##' The function computes discrepancy summaries at global, temporal,
+##' and IU aggregation levels, and optionally returns diagnostic plots.
+##'
+##' Interpretation guide:
+##' \itemize{
+##'   \item \code{summaries$global$pvals}: posterior predictive p-values (PPP) for global
+##'   discrepancy statistics. Values close to 0 or 1 indicate mismatch between
+##'   data and model-implied simulations for the corresponding summary.
+##'   \item \code{summaries$global$pit_summary}: PIT mean/variance; departures from roughly
+##'   Uniform(0,1) moments suggest calibration issues.
+##'   \item \code{summaries$global$z_summary}: quantiles of standardized residuals
+##'   \eqn{(y_i-\mu_i)/\sqrt{v_i}} based on simulation moments. Heavy tails or
+##'   skewness can indicate poor dispersion/shape fit.
+##'   \item \code{summaries$temporal$pvals}: year-level trajectory mismatch summaries.
+##'   \item \code{summaries$iu$pvals}: IU and IU-year support-aware mismatch summaries.
+##'   \item \code{summaries$iu$iu_support}: IU-level support table (number of surveys,
+##'   total examined, observed pooled/unweighted prevalence and inclusion flag).
+##'   \item \code{summaries$iu$diagnostics}: counts summarising IU inclusion and zero vs
+##'   non-zero observed records, including out-of-interval IU counts.
+##' }
+##'
+##' @param y_obs Numeric vector of observed positive counts.
+##' @param m Numeric vector of denominators (examined counts).
+##' @param y_sim Numeric matrix of simulated counts with dimension
+##' \code{length(y_obs) x nsim} (rows are observations, columns are simulation draws).
+##' @param year Observation year (numeric/integer/factor/character coercible to numeric).
+##' @param iu IU identifier vector of same length as \code{y_obs}.
+##' @param m_bins Breaks used to create denominator groups for grouped PPC plots.
+##' @param iu_min_total_m Minimum total examined count required to include an IU
+##' in IU-level summaries.
+##' @param iu_year_min_total_m Minimum total examined count required to include an
+##' IU-year cell in IU-year summaries.
+##' @param prob Central predictive interval probability used in coverage summaries
+##' and envelopes.
+##' @param n_overlay Number of simulation draws to overlay in PPC plots.
+##' @param seed Integer random seed used for randomized PIT and draw subsampling.
+##' @param make_plots Logical; if \code{TRUE}, return PPC plots when plotting
+##' dependencies are available.
+##' @param prevalence_estimand Which prevalence estimand to report and plot:
+##' \code{"pooled"}, \code{"unweighted"} or \code{"both"}.
+##'
+##' @return An object of class \code{"ppc_dast_dgp"} with components:
+##' \describe{
+##'   \item{inputs}{Input metadata and key settings.}
+##'   \item{summaries}{A nested list with \code{global}, \code{temporal}, and \code{iu}
+##'   summary outputs.}
+##'   \item{plots}{A nested list with \code{global}, \code{temporal}, and \code{iu}
+##'   diagnostic plots (possibly empty).}
+##' }
+##'
+##' Year-level and IU-level prevalence trajectories use the examined-weighted
+##' prevalence (pooled prevalence), computed as
+##' \eqn{\sum_i y_i / \sum_i m_i} within each aggregation stratum.
+##' This is different from the unweighted mean of location-level prevalences.
+##'
+##' For IU-level summaries and plots, an IU is included when it has at least one
+##' observed record and total examined count \eqn{\sum_i m_i \ge iu\_min\_total\_m}.
+##'
+##' @details The two-sided PPP is computed as a median-centered tail area:
+##' \deqn{PPP = \frac{1}{S}\sum_{s=1}^{S}
+##' \mathbf{1}\left(\left|T_s^{rep}-\mathrm{median}(T^{rep})\right|
+##' \ge \left|T^{obs}-\mathrm{median}(T^{rep})\right|\right)}
+##' This is robust for asymmetric predictive distributions and does not assume
+##' normality of discrepancy statistics.
+##'
+##' When \code{make_plots = TRUE}, \pkg{bayesplot} is required for PPC plot
+##' primitives. If \pkg{bayesplot} is unavailable, the function returns numeric
+##' summaries and sets \code{out$plot_note} with a warning message.
+##' Prevalence values are computed internally on the 0-1 scale but shown in
+##' plots as percentages for readability.
+##'
+##' The IU mean prevalence PPC plot is a forest-style diagnostic:
+##' observed IU prevalence is shown as points, simulated central intervals are
+##' shown as horizontal ranges, and observed point fill color encodes the number
+##' of survey records contributing to each IU mean. A companion plot
+##' \code{plots$iu$iu_mean_prev_misfit} shows only IUs where observed prevalence
+##' falls outside the simulated central interval.
+##'
+##' @examples
+##' \dontrun{
+##' out <- dast_sim(n_sim = 250, model_fit = dast_with_pen, messages = FALSE)
+##' ppc_all <- ppc_dast_dgp(
+##'   y_obs = dast_with_pen$data_sf$positive,
+##'   m = dast_with_pen$data_sf$examined,
+##'   y_sim = out$data_sim,
+##'   year = dast_with_pen$data_sf$year,
+##'   iu = dast_with_pen$data_sf$IUs_NAME,
+##'   prob = 0.9
+##' )
+##' print(ppc_all)
+##' ppc_all$plots$temporal$year_traj
+##' ppc_all$plots$temporal$year_diffs
+##' ppc_all$plots$iu$iu_mean_prev
+##' ppc_all$plots$iu$iu_mean_prev_misfit
+##' ppc_all$plots$iu$iu_year_cell_ecdf
+##' ppc_all$plots$global$pit_ecdf
+##' ppc_all$plots$global$stat_hist$binom_deviance_plugin_mean
+##' }
+##'
+##' @keywords internal
+ppc_dast_dgp <- function(
+    y_obs, m, y_sim, year, iu,
+    m_bins = c(0, 23.5, 30.5, 49.5, Inf),
+    iu_min_total_m = 50,
+    iu_year_min_total_m = 25,
+    prob = 0.9,
+    n_overlay = 50,
+    seed = 1L,
+    make_plots = TRUE,
+    prevalence_estimand = c("both", "pooled", "unweighted")
+) {
+  set.seed(seed)
+  prevalence_estimand <- match.arg(prevalence_estimand)
+
+  if (!is.numeric(y_obs) || !is.numeric(m) || !is.matrix(y_sim)) {
+    stop("'y_obs' and 'm' must be numeric vectors and 'y_sim' must be a matrix.")
+  }
+  if (length(iu) != length(y_obs)) {
+    stop("'iu' must have the same length as 'y_obs'.")
+  }
+  n <- length(y_obs)
+  if (length(m) != n) stop("'m' must have the same length as 'y_obs'.")
+  if (nrow(y_sim) != n) stop("'y_sim' must be n x nsim (rows are observations).")
+  if (ncol(y_sim) < 2) stop("'y_sim' must contain at least two simulations (nsim >= 2).")
+  nsim <- ncol(y_sim)
+
+  if (anyNA(y_obs) || anyNA(m) || anyNA(y_sim) || anyNA(year) || anyNA(iu)) {
+    stop("Missing values are not allowed; filter data before calling 'ppc_dast_dgp'.")
+  }
+  if (any(m <= 0)) stop("'m' must be strictly positive.")
+  if (any(y_obs < 0 | y_obs > m)) stop("'y_obs' must satisfy 0 <= y_obs <= m.")
+  if (any(y_sim < 0) || any(y_sim > matrix(m, n, nsim))) {
+    stop("'y_sim' must satisfy 0 <= y_sim <= m for each row.")
+  }
+  if (!is.numeric(prob) || length(prob) != 1 || prob <= 0 || prob >= 1) {
+    stop("'prob' must be a scalar in (0, 1).")
+  }
+
+  year_num <- suppressWarnings(as.numeric(as.character(year)))
+  if (anyNA(year_num)) {
+    stop("'year' must be coercible to numeric without introducing missing values.")
+  }
+  year <- year_num
+  iu <- as.factor(iu)
+
+  yrep <- t(y_sim)
+  p_obs <- y_obs / m
+  p_rep <- sweep(yrep, 2, m, "/")
+
+  m_group <- cut(m, breaks = m_bins, include.lowest = TRUE, right = FALSE)
+
+  ord <- order(year)
+  year_ord <- year[ord]
+  y_obs_ord <- y_obs[ord]
+  m_ord <- m[ord]
+  yrep_ord <- yrep[, ord, drop = FALSE]
+  iu_ord <- iu[ord]
+
+  safe_var <- function(x) {
+    if (length(x) <= 1) return(0)
+    stats::var(x)
+  }
+  assert_all_finite <- function(x, label) {
+    if (any(!is.finite(x))) {
+      stop(sprintf("Non-finite values found in %s. Check inputs and simulated values.", label))
+    }
+    invisible(TRUE)
+  }
+
+  ppp_two_sided <- function(T_rep, T_obs) {
+    T_rep <- T_rep[is.finite(T_rep)]
+    if (length(T_rep) == 0 || !is.finite(T_obs)) return(NA_real_)
+    med <- stats::median(T_rep)
+    mean(abs(T_rep - med) >= abs(T_obs - med))
+  }
+
+  estimand_levels <- switch(prevalence_estimand,
+                            both = c("pooled", "unweighted"),
+                            pooled = "pooled",
+                            unweighted = "unweighted")
+
+  prevalence_by_stratum <- function(y_vec, m_vec, group, levels_group, type = c("pooled", "unweighted")) {
+    type <- match.arg(type)
+    sapply(levels_group, function(g) {
+      idx <- which(group == g)
+      if (length(idx) == 0) return(NA_real_)
+      if (type == "pooled") {
+        den <- sum(m_vec[idx])
+        if (den <= 0) return(NA_real_)
+        sum(y_vec[idx]) / den
+      } else {
+        mean(y_vec[idx] / m_vec[idx])
+      }
+    })
+  }
+
+  T_wmean_obs <- sum(y_obs) / sum(m)
+  T_wmean_rep <- rowSums(yrep) / sum(m)
+  T_mean_obs <- mean(p_obs)
+  T_mean_rep <- rowMeans(p_rep)
+  T_var_obs <- safe_var(p_obs)
+  T_var_rep <- apply(p_rep, 1, safe_var)
+  T_zeros_obs <- mean(y_obs == 0)
+  T_zeros_rep <- rowMeans(yrep == 0)
+  eps0 <- 0.01
+  T_zeroish_obs <- mean(p_obs <= eps0)
+  T_zeroish_rep <- rowMeans(p_rep <= eps0)
+  T_maxp_obs <- max(p_obs)
+  T_maxp_rep <- apply(p_rep, 1, max)
+
+  mu_i <- colMeans(yrep)
+  v_i <- apply(yrep, 2, safe_var)
+  v_i[v_i < 1e-12] <- 1e-12
+  z_obs <- (y_obs - mu_i) / sqrt(v_i)
+  T_maxabsz_obs <- max(abs(z_obs))
+  T_maxabsz_rep <- apply(yrep, 1, function(yr) max(abs((yr - mu_i) / sqrt(v_i))))
+
+  alpha <- 1 - prob
+  q_lo <- apply(yrep, 2, stats::quantile, probs = alpha / 2, type = 8)
+  q_hi <- apply(yrep, 2, stats::quantile, probs = 1 - alpha / 2, type = 8)
+  T_cov_obs <- mean(y_obs >= q_lo & y_obs <= q_hi)
+  T_cov_rep <- apply(yrep, 1, function(yr) mean(yr >= q_lo & yr <= q_hi))
+
+  mu_p <- pmin(pmax(mu_i / m, 1e-9), 1 - 1e-9)
+  binom_dev <- function(y, m, p) {
+    y0 <- y
+    y1 <- m - y
+    a <- ifelse(y0 == 0, 0, y0 * log(y0 / (m * p)))
+    b <- ifelse(y1 == 0, 0, y1 * log(y1 / (m * (1 - p))))
+    2 * (a + b)
+  }
+  T_dev_obs <- sum(binom_dev(y_obs, m, mu_p))
+  T_dev_rep <- apply(yrep, 1, function(yr) sum(binom_dev(yr, m, mu_p)))
+
+  rand_pit_i <- function(y_i, sims_i) {
+    Fy <- mean(sims_i <= y_i)
+    Fym <- if (y_i <= 0) 0 else mean(sims_i <= (y_i - 1))
+    Fym + stats::runif(1) * (Fy - Fym)
+  }
+  pit <- vapply(seq_len(n), function(i) rand_pit_i(y_obs[i], y_sim[i, ]), numeric(1))
+
+  global_pvals <- data.frame(
+    stat = c("pooled_mean_prev", "unweighted_mean_prev", "var_prev",
+             "zero_fraction_counts", "zeroish_prev<=0.01", "max_prev",
+             "binom_deviance(plugin_mean)", "max_abs_standardised_resid",
+             sprintf("PI_coverage_%d%%", round(100 * prob))),
+    obs = c(T_wmean_obs, T_mean_obs, T_var_obs,
+            T_zeros_obs, T_zeroish_obs, T_maxp_obs,
+            T_dev_obs, T_maxabsz_obs, T_cov_obs),
+    ppp_two_sided = c(
+      ppp_two_sided(T_wmean_rep, T_wmean_obs),
+      ppp_two_sided(T_mean_rep, T_mean_obs),
+      ppp_two_sided(T_var_rep, T_var_obs),
+      ppp_two_sided(T_zeros_rep, T_zeros_obs),
+      ppp_two_sided(T_zeroish_rep, T_zeroish_obs),
+      ppp_two_sided(T_maxp_rep, T_maxp_obs),
+      ppp_two_sided(T_dev_rep, T_dev_obs),
+      ppp_two_sided(T_maxabsz_rep, T_maxabsz_obs),
+      ppp_two_sided(T_cov_rep, T_cov_obs)
+    ),
+    stringsAsFactors = FALSE
+  )
+
+  yrs <- sort(unique(year_ord))
+  temporal_summaries <- list()
+  temporal_pvals <- data.frame(stat = character(0), ppp_two_sided = numeric(0), stringsAsFactors = FALSE)
+
+  for (est in estimand_levels) {
+    obs_traj_est <- prevalence_by_stratum(y_obs_ord, m_ord, year_ord, yrs, est)
+    rep_traj_est <- t(apply(yrep_ord, 1, function(yr) prevalence_by_stratum(yr, m_ord, year_ord, yrs, est)))
+    if (is.null(dim(rep_traj_est))) rep_traj_est <- matrix(rep_traj_est, nrow = nsim)
+
+    rep_lo_est <- apply(rep_traj_est, 2, stats::quantile, probs = alpha / 2, type = 8, na.rm = TRUE)
+    rep_md_est <- apply(rep_traj_est, 2, stats::quantile, probs = 0.5, type = 8, na.rm = TRUE)
+    rep_hi_est <- apply(rep_traj_est, 2, stats::quantile, probs = 1 - alpha / 2, type = 8, na.rm = TRUE)
+
+    T_year_sse_obs_est <- sum((obs_traj_est - rep_md_est)^2, na.rm = TRUE)
+    T_year_sse_rep_est <- apply(rep_traj_est, 1, function(tr) sum((tr - rep_md_est)^2, na.rm = TRUE))
+
+    d_obs_est <- diff(obs_traj_est)
+    d_rep_est <- t(apply(rep_traj_est, 1, diff))
+    if (is.null(dim(d_rep_est))) d_rep_est <- matrix(d_rep_est, nrow = nsim)
+    d_md_est <- apply(d_rep_est, 2, stats::quantile, probs = 0.5, type = 8, na.rm = TRUE)
+
+    T_year_diff_sse_obs_est <- sum((d_obs_est - d_md_est)^2, na.rm = TRUE)
+    T_year_diff_sse_rep_est <- apply(d_rep_est, 1, function(dr) sum((dr - d_md_est)^2, na.rm = TRUE))
+
+    temporal_pvals <- rbind(
+      temporal_pvals,
+      data.frame(
+        stat = c(paste0("year_traj_SSE_", est), paste0("year_diff_SSE_", est)),
+        ppp_two_sided = c(
+          ppp_two_sided(T_year_sse_rep_est, T_year_sse_obs_est),
+          ppp_two_sided(T_year_diff_sse_rep_est, T_year_diff_sse_obs_est)
+        ),
+        stringsAsFactors = FALSE
+      )
+    )
+
+    temporal_summaries[[est]] <- list(
+      years = yrs,
+      obs_traj = obs_traj_est,
+      rep_traj = rep_traj_est,
+      rep_lo = rep_lo_est,
+      rep_md = rep_md_est,
+      rep_hi = rep_hi_est,
+      d_obs = d_obs_est,
+      d_rep = d_rep_est,
+      d_md = d_md_est
+    )
+  }
+
+  iu_n_obs <- as.integer(table(iu_ord))
+  names(iu_n_obs) <- names(table(iu_ord))
+  iu_tot_m <- tapply(m_ord, iu_ord, sum)
+  iu_tot_y <- tapply(y_obs_ord, iu_ord, sum)
+  iu_prev_unweighted <- sapply(split(y_obs_ord / m_ord, iu_ord), mean)
+  iu_zero_frac <- sapply(split(y_obs_ord == 0, iu_ord), mean)
+  iu_support <- data.frame(
+    iu_id = names(iu_tot_m),
+    n_obs = iu_n_obs[names(iu_tot_m)],
+    total_m = as.numeric(iu_tot_m),
+    total_y = as.numeric(iu_tot_y),
+    obs_prev_pooled = as.numeric(iu_tot_y / iu_tot_m),
+    obs_prev_unweighted = as.numeric(iu_prev_unweighted[names(iu_tot_m)]),
+    zero_obs_frac = as.numeric(iu_zero_frac[names(iu_tot_m)]),
+    stringsAsFactors = FALSE
+  )
+  iu_support$included <- iu_support$n_obs >= 1 & iu_support$total_m >= iu_min_total_m
+  iu_keep <- iu_support$iu_id[iu_support$included]
+  iu_plot_data_list <- list()
+
+  iu_diagnostics <- list(
+    n_iu_total = nrow(iu_support),
+    n_iu_included = sum(iu_support$included),
+    n_iu_excluded_low_m = sum(iu_support$n_obs >= 1 & iu_support$total_m < iu_min_total_m),
+    n_records_zero_y = sum(y_obs_ord == 0),
+    n_records_nonzero_y = sum(y_obs_ord > 0)
+  )
+  iu_details <- list()
+  iu_pvals <- data.frame(stat = character(0), ppp_two_sided = numeric(0), stringsAsFactors = FALSE)
+
+  cell_id <- interaction(iu_ord, year_ord, drop = TRUE)
+  cell_tot_m <- tapply(m_ord, cell_id, sum)
+  cell_keep <- names(cell_tot_m)[cell_tot_m >= iu_year_min_total_m]
+
+  for (est in estimand_levels) {
+    if (length(iu_keep) > 0) {
+      iu_prev <- function(y_vec) {
+        y_tot <- tapply(y_vec, iu_ord, sum)
+        if (est == "pooled") {
+          y_tot[iu_keep] / iu_tot_m[iu_keep]
+        } else {
+          vals <- split(y_vec / m_ord, iu_ord)
+          sapply(iu_keep, function(k) mean(vals[[k]]))
+        }
+      }
+      obs_iu_mean_est <- iu_prev(y_obs_ord)
+      rep_iu_mean_est <- t(apply(yrep_ord, 1, iu_prev))
+      if (is.null(dim(rep_iu_mean_est))) rep_iu_mean_est <- matrix(rep_iu_mean_est, nrow = nsim)
+      assert_all_finite(obs_iu_mean_est, paste0("IU observed mean prevalence (", est, ")"))
+      assert_all_finite(rep_iu_mean_est, paste0("IU replicated mean prevalence (", est, ")"))
+      iu_lo_est <- apply(rep_iu_mean_est, 2, stats::quantile, probs = alpha / 2, type = 8)
+      iu_md_est <- apply(rep_iu_mean_est, 2, stats::quantile, probs = 0.5, type = 8)
+      iu_hi_est <- apply(rep_iu_mean_est, 2, stats::quantile, probs = 1 - alpha / 2, type = 8)
+      assert_all_finite(iu_lo_est, paste0("IU replicated lower quantile (", est, ")"))
+      assert_all_finite(iu_md_est, paste0("IU replicated median (", est, ")"))
+      assert_all_finite(iu_hi_est, paste0("IU replicated upper quantile (", est, ")"))
+      T_iu_sse_obs_est <- sum((obs_iu_mean_est - iu_md_est)^2)
+      T_iu_sse_rep_est <- apply(rep_iu_mean_est, 1, function(v) sum((v - iu_md_est)^2))
+      assert_all_finite(T_iu_sse_rep_est, paste0("IU SSE replicates (", est, ")"))
+      p_iu_sse_est <- ppp_two_sided(T_iu_sse_rep_est, T_iu_sse_obs_est)
+
+      ord_iu <- order(obs_iu_mean_est)
+      iu_ids_ord <- names(obs_iu_mean_est)[ord_iu]
+      support_ord <- iu_support[match(iu_ids_ord, iu_support$iu_id), c("n_obs", "total_m")]
+      iu_plot_data_list[[est]] <- data.frame(
+        estimand = est,
+        iu_id = iu_ids_ord,
+        rank = seq_along(iu_ids_ord),
+        obs = as.numeric(obs_iu_mean_est[ord_iu]),
+        md = as.numeric(iu_md_est[ord_iu]),
+        lo = as.numeric(iu_lo_est[ord_iu]),
+        hi = as.numeric(iu_hi_est[ord_iu]),
+        n_obs = as.integer(support_ord$n_obs),
+        total_m = as.numeric(support_ord$total_m),
+        stringsAsFactors = FALSE
+      )
+    } else {
+      obs_iu_mean_est <- numeric(0)
+      rep_iu_mean_est <- matrix(numeric(0), nrow = nsim, ncol = 0)
+      p_iu_sse_est <- NA_real_
+      iu_plot_data_list[[est]] <- data.frame(
+        estimand = character(0), iu_id = character(0), rank = integer(0),
+        obs = numeric(0), md = numeric(0), lo = numeric(0), hi = numeric(0),
+        n_obs = integer(0), total_m = numeric(0), stringsAsFactors = FALSE
+      )
+    }
+
+    if (length(cell_keep) > 0) {
+      cell_prev <- function(y_vec) {
+        if (est == "pooled") {
+          cell_y <- tapply(y_vec, cell_id, sum)
+          cell_y[cell_keep] / cell_tot_m[cell_keep]
+        } else {
+          vals <- split(y_vec / m_ord, cell_id)
+          sapply(cell_keep, function(k) mean(vals[[k]]))
+        }
+      }
+      obs_cell_est <- cell_prev(y_obs_ord)
+      rep_cell_est <- t(apply(yrep_ord, 1, cell_prev))
+      if (is.null(dim(rep_cell_est))) rep_cell_est <- matrix(rep_cell_est, nrow = nsim)
+      assert_all_finite(obs_cell_est, paste0("IU-year observed prevalence (", est, ")"))
+      assert_all_finite(rep_cell_est, paste0("IU-year replicated prevalence (", est, ")"))
+      cell_md_est <- apply(rep_cell_est, 2, stats::quantile, probs = 0.5, type = 8)
+      assert_all_finite(cell_md_est, paste0("IU-year replicated median (", est, ")"))
+      T_cell_sse_obs_est <- sum((obs_cell_est - cell_md_est)^2)
+      T_cell_sse_rep_est <- apply(rep_cell_est, 1, function(v) sum((v - cell_md_est)^2))
+      assert_all_finite(T_cell_sse_rep_est, paste0("IU-year SSE replicates (", est, ")"))
+      p_cell_sse_est <- ppp_two_sided(T_cell_sse_rep_est, T_cell_sse_obs_est)
+    } else {
+      obs_cell_est <- numeric(0)
+      rep_cell_est <- matrix(numeric(0), nrow = nsim, ncol = 0)
+      p_cell_sse_est <- NA_real_
+    }
+
+    iu_pvals <- rbind(
+      iu_pvals,
+      data.frame(
+        stat = c(paste0("IU_mean_prev_SSE_", est), paste0("IU_year_cell_prev_SSE_", est)),
+        ppp_two_sided = c(p_iu_sse_est, p_cell_sse_est),
+        stringsAsFactors = FALSE
+      )
+    )
+
+    iu_details[[est]] <- list(
+      obs_iu_mean = obs_iu_mean_est,
+      rep_iu_mean = rep_iu_mean_est,
+      obs_cell_prev = obs_cell_est,
+      rep_cell_prev = rep_cell_est
+    )
+  }
+
+  iu_module <- list(
+    iu_keep = iu_keep,
+    iu_tot_m = stats::setNames(iu_support$total_m, iu_support$iu_id)[iu_keep],
+    cell_keep = cell_keep,
+    iu_support = iu_support,
+    diagnostics = iu_diagnostics,
+    details = iu_details,
+    pvals = iu_pvals
+  )
+
+  # Backward-compatible aliases (pooled if available, else first estimand requested)
+  est_primary <- if ("pooled" %in% estimand_levels) "pooled" else estimand_levels[1]
+  iu_module$obs_iu_mean <- iu_module$details[[est_primary]]$obs_iu_mean
+  iu_module$rep_iu_mean <- iu_module$details[[est_primary]]$rep_iu_mean
+  iu_module$obs_cell_prev <- iu_module$details[[est_primary]]$obs_cell_prev
+  iu_module$rep_cell_prev <- iu_module$details[[est_primary]]$rep_cell_prev
+  iu_module$plot_data_iu_mean_prev <- do.call(rbind, iu_plot_data_list)
+  if (nrow(iu_module$plot_data_iu_mean_prev) > 0) {
+    iu_module$plot_data_iu_mean_prev$misfit_flag <-
+      iu_module$plot_data_iu_mean_prev$obs < iu_module$plot_data_iu_mean_prev$lo |
+      iu_module$plot_data_iu_mean_prev$obs > iu_module$plot_data_iu_mean_prev$hi
+    misfit_by_est <- tapply(iu_module$plot_data_iu_mean_prev$misfit_flag,
+                            iu_module$plot_data_iu_mean_prev$estimand, sum)
+    for (est in estimand_levels) {
+      nm <- paste0("n_iu_misfit_", est)
+      iu_diagnostics[[nm]] <- as.integer(if (est %in% names(misfit_by_est)) misfit_by_est[[est]] else 0)
+    }
+    iu_diagnostics$n_iu_misfit_total <- as.integer(sum(iu_module$plot_data_iu_mean_prev$misfit_flag))
+  } else {
+    iu_module$plot_data_iu_mean_prev$misfit_flag <- logical(0)
+    for (est in estimand_levels) {
+      iu_diagnostics[[paste0("n_iu_misfit_", est)]] <- 0L
+    }
+    iu_diagnostics$n_iu_misfit_total <- 0L
+  }
+  iu_module$diagnostics <- iu_diagnostics
+
+  plots <- list()
+  plot_note <- NULL
+  pct_lab <- function(x) paste0(sub("\\.0$", "", sprintf("%.1f", 100 * x)), "%")
+  if (isTRUE(make_plots) && !requireNamespace("bayesplot", quietly = TRUE)) {
+    plot_note <- "Plots were not produced because package 'bayesplot' is not installed. Install it to enable plot outputs."
+    warning(plot_note, call. = FALSE)
+  } else if (isTRUE(make_plots)) {
+    plots_global <- list()
+    plots_temporal <- list()
+    plots_iu <- list()
+
+    S_use <- min(nsim, n_overlay)
+    set.seed(seed + 10L)
+    idx_draws <- sample(seq_len(nsim), S_use)
+    yrep_use <- yrep[idx_draws, , drop = FALSE]
+    p_rep_use <- p_rep[idx_draws, , drop = FALSE]
+
+    plots_global$ecdf_overlay_prev <- bayesplot::ppc_ecdf_overlay(y = p_obs, yrep = p_rep_use, discrete = TRUE) +
+      scale_x_continuous(labels = pct_lab) +
+      labs(x = "Prevalence (%)")
+    plots_global$rootogram_counts <- bayesplot::ppc_rootogram(y = y_obs, yrep = yrep_use)
+    plots_global$error_hist <- bayesplot::ppc_error_hist(y = y_obs, yrep = yrep_use)
+    plots_global$pit_ecdf <- suppressMessages(bayesplot::ppc_loo_pit_ecdf(pit = pit))
+    plots_global$ecdf_prev_by_m <- bayesplot::ppc_ecdf_overlay_grouped(y = p_obs, yrep = p_rep_use, group = m_group, discrete = TRUE) +
+      scale_x_continuous(labels = pct_lab) +
+      labs(x = "Prevalence (%)")
+    plots_global$violin_prev_by_m <- bayesplot::ppc_violin_grouped(y = p_obs, yrep = p_rep_use, group = m_group) +
+      scale_y_continuous(labels = pct_lab) +
+      labs(y = "Prevalence (%)")
+
+    global_stat_meta <- list(
+      list(key = "pooled_mean_prev", label = "Pooled mean prevalence", pval_stat = "pooled_mean_prev", pct = TRUE,
+           fun = function(z) sum(z) / sum(m)),
+      list(key = "unweighted_mean_prev", label = "Unweighted mean prevalence", pval_stat = "unweighted_mean_prev", pct = TRUE,
+           fun = function(z) mean(z / m)),
+      list(key = "var_prev", label = "Variance of prevalence", pval_stat = "var_prev", pct = TRUE,
+           fun = function(z) stats::var(z / m)),
+      list(key = "zero_fraction_counts", label = "Zero fraction (counts)", pval_stat = "zero_fraction_counts", pct = TRUE,
+           fun = function(z) mean(z == 0)),
+      list(key = "zeroish_prev_le_0_01", label = "Zeroish prevalence <= 0.01", pval_stat = "zeroish_prev<=0.01", pct = TRUE,
+           fun = function(z) mean((z / m) <= 0.01)),
+      list(key = "max_prev", label = "Maximum prevalence", pval_stat = "max_prev", pct = TRUE,
+           fun = function(z) max(z / m)),
+      list(key = "binom_deviance_plugin_mean", label = "Binomial deviance (plugin mean)", pval_stat = "binom_deviance(plugin_mean)", pct = FALSE,
+           fun = function(z) sum(binom_dev(z, m, mu_p))),
+      list(key = "max_abs_standardised_resid", label = "Max abs standardised residual", pval_stat = "max_abs_standardised_resid", pct = FALSE,
+           fun = function(z) max(abs((z - mu_i) / sqrt(v_i)))),
+      list(key = paste0("pi_coverage_", round(100 * prob)), label = sprintf("PI coverage %.0f%%", 100 * prob),
+           pval_stat = sprintf("PI_coverage_%d%%", round(100 * prob)), pct = TRUE,
+           fun = function(z) mean(z >= q_lo & z <= q_hi))
+    )
+    plots_global$stat_hist <- list()
+    for (md in global_stat_meta) {
+      pdat <- bayesplot::ppc_stat_data(y = y_obs, yrep = yrep, stat = md$fun)
+      obs_v <- pdat$value[pdat$variable == "y"][1]
+      rep_v <- pdat$value[pdat$variable != "y"]
+      ppp_v <- global_pvals$ppp_two_sided[match(md$pval_stat, global_pvals$stat)]
+      p_stat <- ggplot(data.frame(value = rep_v), aes(x = value)) +
+        geom_histogram(bins = 30, fill = "#BFD7EA", color = "white") +
+        geom_vline(xintercept = obs_v, linewidth = 1.1, color = "#08306B") +
+        theme_bw() +
+        labs(
+          title = paste0("Global PPC: ", md$label),
+          subtitle = sprintf("Observed = %.4g | PPP = %.3f", obs_v, ppp_v),
+          x = "Statistic value",
+          y = "Frequency"
+        )
+      if (isTRUE(md$pct)) p_stat <- p_stat + scale_x_continuous(labels = pct_lab) + labs(x = "Statistic (%)")
+      plots_global$stat_hist[[md$key]] <- p_stat
+    }
+
+    make_line_ribbon_plot <- function(df, xvar, xlabel, ylabel, title_str, facet = FALSE, facet_var = "estimand", x_breaks = NULL, point_size = 1.8) {
+      df_lines <- rbind(
+        data.frame(df[c(xvar, facet_var)], value = df$obs, series = "Observed"),
+        data.frame(df[c(xvar, facet_var)], value = df$md, series = "Simulated median")
+      )
+      interval_lab <- sprintf("Simulated %.0f%% interval", 100 * prob)
+      p <- ggplot(df, aes(x = !!rlang::sym(xvar))) +
+        geom_ribbon(aes(ymin = lo, ymax = hi, fill = interval_lab), alpha = 0.2) +
+        geom_line(data = df_lines, aes(y = value, color = series, linetype = series), linewidth = 0.8) +
+        geom_point(data = df_lines[df_lines$series == "Observed", , drop = FALSE], aes(y = value, color = series), size = point_size) +
+        scale_color_manual(values = c("Observed" = "black", "Simulated median" = "#1f78b4"), name = NULL) +
+        scale_linetype_manual(values = c("Observed" = "solid", "Simulated median" = "dashed"), name = NULL) +
+        scale_fill_manual(values = stats::setNames("#4F93D2", interval_lab), name = NULL) +
+        guides(fill = guide_legend(order = 1), color = guide_legend(order = 2), linetype = guide_legend(order = 2)) +
+        scale_y_continuous(labels = pct_lab) +
+        labs(x = xlabel, y = ylabel, title = title_str) +
+        theme_bw()
+      if (!is.null(x_breaks)) p <- p + scale_x_continuous(breaks = x_breaks)
+      if (isTRUE(facet)) {
+        p <- p + facet_wrap(as.formula(paste("~", facet_var)),
+                            labeller = as_labeller(c(pooled = "Pooled", unweighted = "Unweighted")))
+      }
+      p
+    }
+    make_iu_forest_plot <- function(df, title_str, facet = FALSE, facet_var = "estimand") {
+      interval_lab <- sprintf("Simulated %.0f%% interval", 100 * prob)
+      p <- ggplot(df, aes(y = rank)) +
+        ggplot2::geom_linerange(aes(xmin = lo, xmax = hi, color = interval_lab), linewidth = 0.65) +
+        geom_point(aes(x = md, color = "Simulated median"), shape = 124, size = 3.2) +
+        geom_point(aes(x = obs, fill = n_obs, color = "Observed"), shape = 21, size = 2.2, stroke = 0.25, alpha = 0.72) +
+        scale_color_manual(
+          values = c("Observed" = "black", "Simulated median" = "black", stats::setNames("grey20", interval_lab)),
+          breaks = c(interval_lab, "Observed", "Simulated median"),
+          name = NULL
+        ) +
+        ggplot2::scale_fill_gradient(name = "Number of surveys (n)", low = "#DCEAF7", high = "#0B4F8A") +
+        scale_x_continuous(labels = pct_lab) +
+        labs(
+          x = "Prevalence (%)",
+          y = "IU rank (ordered by observed prevalence)",
+          title = title_str
+        ) +
+        theme_bw() +
+        theme(panel.grid.major.y = ggplot2::element_line(color = "grey90"),
+              panel.grid.minor.y = ggplot2::element_blank())
+      if (isTRUE(facet)) {
+        p <- p + facet_wrap(as.formula(paste("~", facet_var)),
+                            labeller = as_labeller(c(pooled = "Pooled", unweighted = "Unweighted")))
+      }
+      p
+    }
+
+    if (identical(prevalence_estimand, "both")) {
+      year_f <- do.call(rbind, lapply(c("pooled", "unweighted"), function(est) {
+        tm <- temporal_summaries[[est]]
+        data.frame(estimand = est, year = tm$years, obs = tm$obs_traj, lo = tm$rep_lo, md = tm$rep_md, hi = tm$rep_hi)
+      }))
+      plots_temporal$year_traj <- make_line_ribbon_plot(
+        year_f, "year", "Year", "Prevalence (%)",
+        sprintf("Year trend PPC (%.0f%% envelope)", 100 * prob),
+        facet = TRUE, x_breaks = yrs
+      )
+
+      diff_f <- do.call(rbind, lapply(c("pooled", "unweighted"), function(est) {
+        tm <- temporal_summaries[[est]]
+        dy <- tm$years[-1]
+        lo_d <- apply(tm$d_rep, 2, stats::quantile, probs = alpha / 2, type = 8, na.rm = TRUE)
+        md_d <- apply(tm$d_rep, 2, stats::quantile, probs = 0.5, type = 8, na.rm = TRUE)
+        hi_d <- apply(tm$d_rep, 2, stats::quantile, probs = 1 - alpha / 2, type = 8, na.rm = TRUE)
+        data.frame(estimand = est, year = dy, obs = tm$d_obs, lo = lo_d, md = md_d, hi = hi_d)
+      }))
+      plots_temporal$year_diffs <- make_line_ribbon_plot(
+        diff_f, "year", "Year", "Delta prevalence (%)",
+        sprintf("Year-to-year change PPC (%.0f%% envelope)", 100 * prob),
+        facet = TRUE, x_breaks = sort(unique(diff_f$year))
+      ) + geom_abline(intercept = 0, slope = 0, linetype = 2)
+
+      iu_f <- iu_module$plot_data_iu_mean_prev
+      iu_f <- iu_f[iu_f$estimand %in% c("pooled", "unweighted"), , drop = FALSE]
+      if (!is.null(iu_f) && nrow(iu_f) > 0) {
+        plots_iu$iu_mean_prev <- make_iu_forest_plot(
+          iu_f,
+          sprintf("IU mean prevalence PPC (%.0f%% envelope)", 100 * prob),
+          facet = TRUE
+        )
+        iu_f_misfit <- iu_f[iu_f$misfit_flag, , drop = FALSE]
+        if (nrow(iu_f_misfit) > 0) {
+          plots_iu$iu_mean_prev_misfit <- make_iu_forest_plot(
+            iu_f_misfit,
+            sprintf("IU prevalence PPC: out-of-interval IUs (%.0f%% envelope)", 100 * prob),
+            facet = TRUE
+          )
+        } else {
+          plots_iu$iu_mean_prev_misfit <- NULL
+        }
+      }
+    } else {
+      est <- estimand_levels[1]
+      est_label <- if (est == "pooled") "Pooled prevalence (%)" else "Unweighted prevalence (%)"
+      tm <- temporal_summaries[[est]]
+      df_year <- data.frame(estimand = est, year = tm$years, obs = tm$obs_traj, lo = tm$rep_lo, md = tm$rep_md, hi = tm$rep_hi)
+      plots_temporal$year_traj <- make_line_ribbon_plot(
+        df_year, "year", "Year", est_label,
+        sprintf("Year trend PPC (%s, %.0f%% envelope)", est, 100 * prob),
+        x_breaks = yrs
+      )
+
+      dy <- tm$years[-1]
+      lo_d <- apply(tm$d_rep, 2, stats::quantile, probs = alpha / 2, type = 8, na.rm = TRUE)
+      md_d <- apply(tm$d_rep, 2, stats::quantile, probs = 0.5, type = 8, na.rm = TRUE)
+      hi_d <- apply(tm$d_rep, 2, stats::quantile, probs = 1 - alpha / 2, type = 8, na.rm = TRUE)
+      df_diff <- data.frame(estimand = est, year = dy, obs = tm$d_obs, lo = lo_d, md = md_d, hi = hi_d)
+      plots_temporal$year_diffs <- make_line_ribbon_plot(
+        df_diff, "year", "Year", paste0("Delta ", est_label),
+        sprintf("Year-to-year change PPC (%s, %.0f%% envelope)", est, 100 * prob),
+        x_breaks = dy
+      ) + geom_abline(intercept = 0, slope = 0, linetype = 2)
+
+      df_iu <- iu_module$plot_data_iu_mean_prev
+      df_iu <- df_iu[df_iu$estimand == est, , drop = FALSE]
+      if (nrow(df_iu) > 0) {
+        plots_iu$iu_mean_prev <- make_iu_forest_plot(
+          df_iu,
+          sprintf("IU mean prevalence PPC (%s, %.0f%% envelope)", est, 100 * prob)
+        )
+        df_iu_misfit <- df_iu[df_iu$misfit_flag, , drop = FALSE]
+        if (nrow(df_iu_misfit) > 0) {
+          plots_iu$iu_mean_prev_misfit <- make_iu_forest_plot(
+            df_iu_misfit,
+            sprintf("IU prevalence PPC: out-of-interval IUs (%s, %.0f%% envelope)", est, 100 * prob)
+          )
+        } else {
+          plots_iu$iu_mean_prev_misfit <- NULL
+        }
+      }
+    }
+
+    est_plot_primary <- if ("pooled" %in% estimand_levels) "pooled" else estimand_levels[1]
+    rep_cell_primary <- iu_module$details[[est_plot_primary]]$rep_cell_prev
+    obs_cell_primary <- iu_module$details[[est_plot_primary]]$obs_cell_prev
+    if (!is.null(rep_cell_primary) && ncol(rep_cell_primary) > 0) {
+      obs_cell_vec <- as.numeric(obs_cell_primary)
+      rep_cell_use <- rep_cell_primary[idx_draws, , drop = FALSE]
+      plots_iu$iu_year_cell_ecdf <- bayesplot::ppc_ecdf_overlay(y = obs_cell_vec, yrep = rep_cell_use, discrete = TRUE)
+    }
+
+    plots <- list(global = plots_global, temporal = plots_temporal, iu = plots_iu)
+  }
+
+  out <- list(
+    inputs = list(
+      n = n, nsim = nsim, prob = prob,
+      m_bins = m_bins, iu_min_total_m = iu_min_total_m,
+      iu_year_min_total_m = iu_year_min_total_m,
+      prevalence_estimand = prevalence_estimand
+    ),
+    summaries = list(
+      global = list(
+        pvals = global_pvals,
+        pit_summary = c(mean = mean(pit), var = safe_var(pit)),
+        z_summary = stats::quantile(z_obs, probs = c(0.01, 0.05, 0.5, 0.95, 0.99), na.rm = TRUE)
+      ),
+      temporal = list(
+        pvals = temporal_pvals,
+        summaries = temporal_summaries,
+        years = temporal_summaries[[est_primary]]$years,
+        obs_traj = temporal_summaries[[est_primary]]$obs_traj,
+        rep_lo = temporal_summaries[[est_primary]]$rep_lo,
+        rep_md = temporal_summaries[[est_primary]]$rep_md,
+        rep_hi = temporal_summaries[[est_primary]]$rep_hi
+      ),
+      iu = iu_module
+    ),
+    plots = plots
+  )
+  if (!is.null(plot_note)) out$plot_note <- plot_note
+  class(out) <- "ppc_dast_dgp"
+  out
+}
+
+##' Print Method for Internal DAST PPC Objects
+##'
+##' Prints key posterior predictive discrepancy summaries returned by
+##' \code{ppc_dast_dgp()}.
+##'
+##' @param x An object of class \code{"ppc_dast_dgp"}.
+##' @param ... Not used.
+##'
+##' @return Invisibly returns \code{x}.
+##'
+##' @method print ppc_dast_dgp
+##' @export
+##' @keywords internal
+print.ppc_dast_dgp <- function(x, ...) {
+  cat("DAST DGP PPC summary\n")
+  cat(sprintf("n = %d locations; nsim = %d replicates; prob = %.2f\n",
+              x$inputs$n, x$inputs$nsim, x$inputs$prob))
+  cat("\nGlobal discrepancy PPC p-values:\n")
+  print(x$summaries$global$pvals, row.names = FALSE)
+  cat("\nTemporal discrepancy PPC p-values:\n")
+  print(x$summaries$temporal$pvals, row.names = FALSE)
+  cat("\nIU-level discrepancy PPC p-values:\n")
+  print(x$summaries$iu$pvals, row.names = FALSE)
+  cat("\nInterpretation note:\n")
+  cat("PPP values near 0 or 1 indicate potential misfit. Very high PPP values can also\n")
+  cat("mean the observed summary is unusually close to the predictive center.\n")
+  cat("\nPIT summary:\n")
+  print(x$summaries$global$pit_summary)
+  cat("\nStandardised residual quantiles:\n")
+  print(x$summaries$global$z_summary)
+  if (!is.null(x$plot_note)) {
+    cat("\nPlot note:\n")
+    cat(x$plot_note, "\n")
+  }
+  invisible(x)
+}
+
+
 
 dast_fit <-
   function(y, D, coords, time, units_m, kappa, penalty,

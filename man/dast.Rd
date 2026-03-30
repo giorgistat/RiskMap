@@ -40,7 +40,12 @@ dast(
 \item{int_mat}{Intervention matrix specifying the timing and coverage of MDA; the dimension of the matrix
 must be \code{n * n_mda}, where \code{n} is the number of rows of \code{data} and \code{n_mda} is the length of \code{mda_times}.}
 
-\item{penalty}{Optional list specifying penalty functions for regularization, used in the estimation of the "drop" parameter \code{alpha}.}
+\item{penalty}{Optional list of length 6 specifying penalty functions for regularization.
+Elements \code{[[1]]}, \code{[[2]]}, \code{[[3]]} are the penalty, its first and second
+derivative with respect to \code{alpha}. Elements \code{[[4]]}, \code{[[5]]}, \code{[[6]]}
+are the penalty, its first and second derivative with respect to \code{gamma}.
+Any of these six elements may be set to \code{function(x) 0} to suppress penalisation
+for that parameter.}
 
 \item{drop}{Optional value used for fixing the "drop" parameter of the MDA impact function.}
 

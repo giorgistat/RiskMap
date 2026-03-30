@@ -27,6 +27,7 @@ dsgm_fit_tmb(
   fix_k = NULL,
   fix_tau2 = NULL,
   use_mda = TRUE,
+  intensity_family = 0L,
   use_hessian_refinement = TRUE,
   messages = TRUE
 )
@@ -54,6 +55,7 @@ dsgm_fit_tmb(
   fix_k = NULL,
   fix_tau2 = NULL,
   use_mda = TRUE,
+  intensity_family = 0L,
   use_hessian_refinement = TRUE,
   messages = TRUE
 )
@@ -63,7 +65,5 @@ dsgm_fit_tmb(
 }
 \description{
 MCML estimation using TMB for automatic differentiation.
-
-MCML estimation using TMB for automatic differentiation
 }
 \keyword{internal}

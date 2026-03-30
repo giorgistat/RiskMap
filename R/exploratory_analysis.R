@@ -43,12 +43,18 @@ dist_summaries <- function(data,
 
 
 ##' @title Empirical variogram
-##' @description Computes the empirical variogram using ``bins'' of distance provided by the user.
+##' @description Computes the empirical variogram using lag-distance breakpoints.
 ##' @param data an object of class \code{sf} containing the variable for which the variogram
 ##' is to be computed and the coordinates
 ##' @param variable a character indicating the name of variable for which the variogram is to be computed.
-##' @param bins a vector indicating the `bins` to be used to define the classes of distance used in the computation of the variogram.
-##' By default \code{bins=NULL} and bins are then computed as \code{seq(0, d_max/2, length=15)} where \code{d_max} is the maximum distance observed in the data.
+##' @param breaks an optional numeric vector of lag-distance breakpoints.
+##' If supplied, these breakpoints are used directly to define the distance classes.
+##' @param n_bins the number of lag-distance classes to generate when \code{breaks = NULL}.
+##' By default \code{n_bins = 14}.
+##' @param max_dist an optional maximum lag distance. When \code{breaks = NULL},
+##' the breakpoints are generated as \code{seq(0, max_dist, length.out = n_bins + 1)}.
+##' By default \code{max_dist = NULL} and the upper lag distance is set to \code{d_max/3},
+##' where \code{d_max} is the maximum observed distance in the data.
 ##' @param n_permutation a non-negative integer indicating the number of permutation used to compute the 95% confidence
 ##' level envelope under the assumption of spatial independence. By default \code{n_permutation=0}, and no envelope is generated.
 ##' @param convert_to_utm a logical value, indicating if the conversion to UTM shuold be performed (\code{convert_to_utm = TRUE}) or
@@ -62,7 +68,7 @@ dist_summaries <- function(data,
 ##'
 ##' @return an object of class 'variogram' which is a list containing the following components
 ##' @return \code{variogram} a data-frame containing the following columns: \code{mid_points},
-##' the middle points of the classes of distance provided by \code{bins};
+##' the middle points of the classes of distance provided by \code{breaks};
 ##' \code{obs_vari} the values of the observed variogram; \code{obs_vari} the number of pairs.
 ##' If \code{n_permutation > 0}, the data-frame also contains \code{lower_bound} and \code{upper_bound}
 ##' corresponding to the lower and upper bounds of the 95% confidence intervals
@@ -78,12 +84,22 @@ dist_summaries <- function(data,
 ##' @export
 ##'
 
-s_variogram <- function(data, variable, bins = NULL,
+s_variogram <- function(data, variable, breaks = NULL,
+                      n_bins = 14L,
+                      max_dist = NULL,
                       n_permutation = 0,
                       convert_to_utm = TRUE,
                       scale_to_km = FALSE) {
 
   if(class(data)[1]!="sf") stop("'data' must be an object of class 'sf'")
+  if(!is.null(breaks) && !missing(n_bins)) stop("'breaks' and 'n_bins' cannot both be supplied")
+  if(!is.null(breaks) && !missing(max_dist)) stop("'breaks' and 'max_dist' cannot both be supplied")
+  if(length(n_bins) != 1 || !is.numeric(n_bins) || n_bins < 1 || n_bins != round(n_bins)) {
+    stop("'n_bins' must be a positive integer")
+  }
+  if(!is.null(max_dist) && (length(max_dist) != 1 || !is.numeric(max_dist) || max_dist <= 0)) {
+    stop("'max_dist' must be a positive numeric value")
+  }
   if(n_permutation < 0 |
      n_permutation != round(n_permutation)) stop("n_permutation must be a positive integer number")
 
@@ -96,20 +112,29 @@ s_variogram <- function(data, variable, bins = NULL,
   if(scale_to_km) d <- d/1000
   v <- (as.numeric(dist(data[[variable]])) ^ 2) / 2
   vario_df <- data.frame(d=d, v=v)
-  if(is.null(bins)) {
-    max.v <- max(d)/2
-    bins <- seq(0, max.v, length=15)
-  } else {
-    max.v <- max(bins)
-  }
-  if(max.v > max(d)) stop("the provided distances in 'bins' go beyond
-                          the maximum observed distance")
-  mid_points <- bins[-length(bins)] + (bins[2] - bins[1]) / 2
 
-  vario_df <- vario_df[vario_df$d < max.v,]
-  if(nrow(vario_df)==0) stop("the values provided in 'bins' do not match the
-  scale of the obsererved distances; consider setting scale_to_km = TRUE")
-  vario_df$dist_class <- cut(vario_df$d, breaks = bins,
+  if(is.null(breaks)) {
+    upper_dist <- if(is.null(max_dist)) max(d) / 3 else max_dist
+    breaks <- seq(0, upper_dist, length.out = n_bins + 1)
+  } else {
+    if(!is.numeric(breaks) || length(breaks) < 2) {
+      stop("'breaks' must be a numeric vector with at least two values")
+    }
+    if(any(diff(breaks) <= 0)) {
+      stop("'breaks' must be strictly increasing")
+    }
+    if(min(breaks) < 0) {
+      stop("'breaks' must be non-negative")
+    }
+    upper_dist <- max(breaks)
+  }
+  if(upper_dist > max(d)) stop("the provided lag distances go beyond the maximum observed distance")
+  mid_points <- (breaks[-1] + breaks[-length(breaks)]) / 2
+
+  vario_df <- vario_df[vario_df$d <= upper_dist,]
+  if(nrow(vario_df)==0) stop("the provided lag distances do not match the
+  scale of the observed distances; consider setting scale_to_km = TRUE")
+  vario_df$dist_class <- cut(vario_df$d, breaks = breaks,
                              include.lowest = TRUE, right = TRUE)
   variogram <- data.frame(mid_points = mid_points)
   variogram$obs_vari <- tapply(vario_df$v, vario_df$dist_class, mean)
@@ -126,7 +151,7 @@ s_variogram <- function(data, variable, bins = NULL,
       v_i <- (as.numeric(dist(data[[variable]][ind_perm])) ^ 2) / 2
 
       vario_df_i <- data.frame(d=d, v=v_i)
-      vario_df_i <- vario_df_i[vario_df_i$d < max.v,]
+      vario_df_i <- vario_df_i[vario_df_i$d <= upper_dist,]
       vario_df_i$dist_class <- vario_df$dist_class
 
       v_perm[,i] <- tapply(vario_df_i$v, vario_df_i$dist_class, mean)
@@ -141,6 +166,7 @@ s_variogram <- function(data, variable, bins = NULL,
   result <- list(variogram = variogram)
   result$scale_to_km <- scale_to_km
   result$n_permutation <- n_permutation
+  result$breaks <- breaks
 
   class(result) <- "RiskMap_variogram"
   return(result)

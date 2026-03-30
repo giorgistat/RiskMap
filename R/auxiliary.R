@@ -1615,10 +1615,10 @@ print.summary.RiskMap.spatial.cv <- function(x, ...) {
 ##'                       all models in a single panel (\code{TRUE})
 ##'                       or one panel per model (\code{FALSE}, default).
 ##'
-##' @return A \pkg{ggplot2} object (single plot) or a \pkg{ggpubr} grid.
+##' @return A \pkg{ggplot2} object (single plot) or a \pkg{grid} object
+##'   from \pkg{gridExtra} (multiple panels).
 ##'
 ##' @importFrom ggplot2 ggplot aes geom_line geom_abline labs theme_minimal guides guide_legend
-##' @importFrom ggpubr  ggarrange
 ##' @importFrom dplyr   filter group_by summarize %>%
 ##' @importFrom stats    ecdf
 ##' @export
@@ -1740,7 +1740,7 @@ plot_AnPIT <- function(object,
   } else {
     ncol <- ifelse(length(plots) == 2, 2, 2)
     nrow <- ceiling(length(plots) / ncol)
-    ggpubr::ggarrange(plotlist = plots, ncol = ncol, nrow = nrow)
+    do.call(gridExtra::grid.arrange, c(plots, ncol = ncol, nrow = nrow))
   }
 }
 

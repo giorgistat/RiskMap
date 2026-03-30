@@ -29,7 +29,8 @@ all models in a single panel (\code{TRUE})
 or one panel per model (\code{FALSE}, default).}
 }
 \value{
-A \pkg{ggplot2} object (single plot) or a \pkg{ggpubr} grid.
+A \pkg{ggplot2} object (single plot) or a \pkg{grid} object
+  from \pkg{gridExtra} (multiple panels).
 }
 \description{
 Produce calibration plots from a \code{RiskMap.spatial.cv} object returned by

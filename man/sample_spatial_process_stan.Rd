@@ -26,16 +26,9 @@ sample_spatial_process_stan(
 )
 }
 \arguments{
-\item{par}{Named list with fields: \code{beta}, \code{k}, \code{rho},
-\code{alpha_W}, \code{gamma_W}, \code{sigma2}, \code{phi}.}
-
 \item{intensity_family}{Integer; 0 = shifted Gamma (default), 1 = zero-truncated NegBin.}
 }
-\value{
-An object of class \code{dsgm_spatial_samples}.
-}
 \description{
-Samples S(x) from its posterior at fixed theta_0 using
-  \code{inst/stan/dsgm_spatial.stan}.
+Sample spatial process for the STH model
 }
 \keyword{internal}
