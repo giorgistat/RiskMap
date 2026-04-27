@@ -1,4 +1,112 @@
 url: https://claudiofronterre.github.io/RiskMap/
+
 template:
   bootstrap: 5
+  bslib:
+    bootswatch: flatly
 
+home:
+  title: RiskMap
+  description: >
+    Geostatistical modelling and prediction for global public health using
+    Gaussian process models in R.
+  links:
+    - text: MBG-R book (Giorgi, Fronterre)
+      href: https://www.mbgr.org/
+    - text: Source code on GitHub
+      href: https://github.com/claudiofronterre/RiskMap
+
+navbar:
+  structure:
+    left: [home, reference]
+    right: [book, github]
+  components:
+    book:
+      text: MBG-R (Giorgi, Fronterre)
+      href: https://www.mbgr.org/
+    github:
+      icon: fab fa-github
+      href: https://github.com/claudiofronterre/RiskMap
+      aria-label: GitHub repository
+
+footer:
+  structure:
+    left: [team]
+    right: [book]
+  components:
+    team: "Developed by the RiskMap team: Emanuele Giorgi and Claudio Fronterre."
+    book: "Learn RiskMap with [MBG-R](https://www.mbgr.org/)."
+
+reference:
+  - title: Model Fitting
+    contents:
+      - glgpm
+      - dast
+      - gp
+      - re
+
+  - title: Simulation and MCMC
+    contents:
+      - set_control_sim
+      - Laplace_sampling_MCMC
+      - glgpm_sim
+      - dast_sim
+      - surf_sim
+
+  - title: Prediction and Targets
+    contents:
+      - pred_over_grid
+      - pred_target_grid
+      - pred_target_shp
+      - update_predictors
+
+  - title: Diagnostics and Assessment
+    contents:
+      - check_mcmc
+      - assess_pp
+      - assess_sim
+      - plot_AnPIT
+      - plot_score
+      - dist_summaries
+      - s_variogram
+      - plot_s_variogram
+      - plot_sim_surf
+      - plot_mda
+
+  - title: Summaries and Plot Methods
+    contents:
+      - summary.RiskMap
+      - summary.RiskMap.sim.res
+      - summary.RiskMap.spatial.cv
+      - print.summary.RiskMap
+      - print.summary.RiskMap.sim.res
+      - print.summary.RiskMap.spatial.cv
+      - plot.RiskMap_pred_target_grid
+      - plot.RiskMap_pred_target_shp
+
+  - title: Core Utilities
+    contents:
+      - create_grid
+      - compute_ID_coords
+      - convex_hull_sf
+      - propose_utm
+      - matern_cor
+      - matern.grad.phi
+      - matern.hessian.phi
+      - maxim.integrand
+      - to_table
+      - coef.RiskMap
+
+  - title: Example Datasets
+    contents:
+      - abund_sma
+      - anopheles
+      - galicia
+      - infect_sma
+      - italy_sim
+      - liberia
+      - loaloa
+      - malkenya
+      - malnutrition
+      - tz_covariates
+      - tz_malaria

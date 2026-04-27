@@ -10,7 +10,7 @@ set_control_sim(
   thin = 10,
   h = NULL,
   c1.h = 0.01,
-  c2.h = 1e-04,
+  c2.h = 0.0001,
   linear_model = FALSE,
   sampler = c("mcmc", "stan"),
   n_chains = 1,

@@ -8,7 +8,7 @@ plot_mda(
   object,
   mda_history = NULL,
   n_sim = 1000,
-  x_min = 1e-06,
+  x_min = 0.000001,
   x_max = 10,
   conf_level = 0.95,
   lower_f = NULL,

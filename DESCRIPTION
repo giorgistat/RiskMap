@@ -35,10 +35,12 @@ Imports:
     Deriv,
     numDeriv,
     dplyr,
+    tibble,
     ggplot2,
-    ggpubr,
     gridExtra,
+    rlang,
     sf,
     sns,
     stars
-
+Suggests:
+    bayesplot
