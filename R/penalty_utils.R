@@ -1,0 +1,46 @@
+##' @title Construct a unified MDA penalty specification
+##' @export
+make_penalty <- function(alpha_a    = NULL,
+                         alpha_b    = NULL,
+                         gamma_type = "lognormal",
+                         gamma_mean,
+                         gamma_sd) {
+  if (!gamma_type %in% c("lognormal", "normal", "gamma"))
+    stop("gamma_type must be 'lognormal', 'normal', or 'gamma'")
+  list(alpha_a    = alpha_a,
+       alpha_b    = alpha_b,
+       gamma_type = gamma_type,
+       gamma_mean = gamma_mean,
+       gamma_sd   = gamma_sd)
+}
+
+##' @title Convert unified penalty to DAST format (list of 6 functions)
+##' @export
+penalty_to_dast <- function(p) {
+  if (!is.null(p$alpha_a) && !is.null(p$alpha_b)) {
+    a <- p$alpha_a; b <- p$alpha_b
+    pn    <- function(alpha) (a-1)*log(alpha) + (b-1)*log(1-alpha)
+    pn_d1 <- function(alpha) (a-1)/alpha - (b-1)/(1-alpha)
+    pn_d2 <- function(alpha) -(a-1)/alpha^2 - (b-1)/(1-alpha)^2
+  } else {
+    pn <- pn_d1 <- pn_d2 <- function(x) 0
+  }
+  mu <- p$gamma_mean; sd <- p$gamma_sd
+  pn_g    <- function(g) -log(g) - (log(g) - mu)^2 / (2*sd^2)
+  pn_g_d1 <- function(g) -1/g - (log(g) - mu) / (sd^2 * g)
+  pn_g_d2 <- function(g)  1/g^2 - (1 - log(g) + mu) / (sd^2 * g^2)
+  list(pn, pn_d1, pn_d2, pn_g, pn_g_d1, pn_g_d2)
+}
+
+##' @title Convert unified penalty to DSGM/TMB format (named scalar list)
+##' @export
+penalty_to_dsgm <- function(p) {
+  out <- list(gamma_type = p$gamma_type,
+              gamma_mean = p$gamma_mean,
+              gamma_sd   = p$gamma_sd)
+  if (!is.null(p$alpha_a)) {
+    out$alpha_param1 <- p$alpha_a
+    out$alpha_param2 <- p$alpha_b
+  }
+  out
+}

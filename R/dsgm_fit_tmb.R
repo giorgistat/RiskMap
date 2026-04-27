@@ -96,11 +96,11 @@ convert_penalty_to_tmb <- function(penalty) {
     tmb_penalty$gamma_param2       <- penalty$gamma_rate
 
   } else if (!is.null(penalty$gamma_mean) && !is.null(penalty$gamma_sd)) {
+    warning("gamma_type not specified; defaulting to 'lognormal'. Set gamma_type explicitly.")
     tmb_penalty$use_gamma_penalty  <- 1
-    tmb_penalty$gamma_penalty_type <- 2
+    tmb_penalty$gamma_penalty_type <- 3        # lognormal — consistent with convention
     tmb_penalty$gamma_param1       <- penalty$gamma_mean
     tmb_penalty$gamma_param2       <- penalty$gamma_sd
-
   } else if (!is.null(penalty$gamma) && is.function(penalty$gamma)) {
     warning("Using function-based gamma penalty. Defaulting to Gamma(2,1).")
     tmb_penalty$use_gamma_penalty  <- 1

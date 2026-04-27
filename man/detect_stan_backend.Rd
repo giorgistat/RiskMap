@@ -7,9 +7,6 @@
 detect_stan_backend(messages = TRUE)
 }
 \description{
-Prefers cmdstanr because its compiled executable persists
-  across R sessions without DSO issues. Falls back to rstan only when
-  cmdstanr is unavailable. With rstan the model is recompiled every new
-  R session (the DSO is process-local and cannot be cached on disk).
+Detect available Stan backend
 }
 \keyword{internal}

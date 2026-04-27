@@ -6,21 +6,7 @@
 \usage{
 get_stan_model(model = c("sth", "lf"), backend = NULL, messages = TRUE)
 }
-\arguments{
-\item{model}{\code{"sth"} uses \code{inst/stan/dsgm_spatial.stan};
-\code{"lf"} uses \code{inst/stan/dsgm_mdiag.stan}.}
-
-\item{backend}{\code{"rstan"}, \code{"cmdstanr"}, or \code{NULL}
-(auto-detect).}
-}
 \description{
-Returns a compiled Stan model for either the STH or LF model.
-  Uses separate cache slots so both models can coexist in a session.
-
-  For \code{cmdstanr} (recommended), the compiled executable is written to
-  a persistent user cache directory (\code{tools::R_user_dir("RiskMap", "cache")})
-  and reused across R sessions without recompilation. For \code{rstan},
-  the model DSO is process-local and must be relinked every new R session;
-  use cmdstanr to avoid this.
+Compile and cache a Stan model
 }
 \keyword{internal}

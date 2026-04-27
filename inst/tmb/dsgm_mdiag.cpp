@@ -245,8 +245,10 @@ Type objective_function<Type>::operator() ()
         penalty -= (gamma_W_param1 - Type(1.0)) * log(gamma_W);
         penalty += gamma_W_param2 * gamma_W;
       } else if (gamma_W_penalty_type == 2) {
-        // Normal(mean, sd) on gamma_W
         Type d = gamma_W - gamma_W_param1;
+        penalty += Type(0.5) * d * d / (gamma_W_param2 * gamma_W_param2);
+      } else if (gamma_W_penalty_type == 3) {
+        Type d = log_gamma_W - gamma_W_param1;
         penalty += Type(0.5) * d * d / (gamma_W_param2 * gamma_W_param2);
       }
     }

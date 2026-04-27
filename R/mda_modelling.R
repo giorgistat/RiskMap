@@ -135,7 +135,9 @@ dast_initial_value <- function(y, D, units_m, int_mat, survey_times_data,
     return(out)
   }
 
-  start <- c(runif(p+1,-1,1), mean(dist(survey_times_data)))
+  start <- c(runif(p, -1, 1),
+             0,
+             log(mean(dist(survey_times_data))))
   est <- nlminb(start, llik)
 
   est$beta <- est$par[1:p]
@@ -317,12 +319,8 @@ dast <- function(formula,
   # [[4]]-[[6]]: gamma penalty and its first/second derivatives.
   if(is.null(penalty)) {
     no_penalty <- TRUE
-    penalty <- list(pn        = function(x) return(0),
-                    pn_d1     = function(x) return(0),
-                    pn_d2     = function(x) return(0),
-                    pn_gamma    = function(x) return(0),
-                    pn_gamma_d1 = function(x) return(0),
-                    pn_gamma_d2 = function(x) return(0))
+    penalty <- list(function(x) 0, function(x) 0, function(x) 0,
+                    function(x) 0, function(x) 0, function(x) 0)
   } else {
     no_penalty <- FALSE
     if(length(penalty) != 6)
@@ -792,7 +790,7 @@ dast_fit <-
 
       q.f_S <- n_loc*log(val$sigma2)+val$ldetR+t(S)%*%val$R.inv%*%S/val$sigma2
       # Subtract both alpha and gamma penalties
-      out <- -0.5*(q.f_S+q.f_re)+llik - val$pen_alpha - val$pen_gamma
+      out <- -0.5*(q.f_S+q.f_re)+llik
       return(out)
     }
 
@@ -823,9 +821,8 @@ dast_fit <-
       val$mda_effect <- compute_mda_effect(survey_times_data, mda_times,
                                            intervention = int_mat,
                                            alpha, gamma, kappa = power_val)
-      # Alpha penalty (penalty[[1]]) and gamma penalty (penalty[[4]])
-      val$pen_alpha <- penalty[[1]](alpha)
-      val$pen_gamma <- penalty[[4]](gamma)
+
+
       if(n_re > 0) {
         val$sigma2_re <- exp(par[ind_sigma2_re])
       }
@@ -876,7 +873,10 @@ dast_fit <-
     log.f.tilde <- compute.log.f(par0_vec)
 
     MC.log.lik <- function(par) {
-      log(mean(exp(compute.log.f(par)-log.f.tilde)))
+      alpha <- if (is.null(fix_alpha)) exp(par[ind_alpha])/(1+exp(par[ind_alpha])) else fix_alpha
+      gamma <- exp(par[ind_gamma])
+      log(mean(exp(compute.log.f(par)-log.f.tilde))) +
+        penalty[[1]](alpha) + penalty[[4]](gamma)
     }
 
     grad.MC.log.lik <- function(par) {

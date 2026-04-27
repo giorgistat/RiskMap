@@ -1436,6 +1436,7 @@ pred_target_shp <- function(object, shp, shp_target = mean,
 
 ##' Plot Method for RiskMap_pred_target_shp Objects
 ##'
+##' @description
 ##' Generates a plot of predictive target values or summaries over a shapefile.
 ##'
 ##' @param x An object of class 'RiskMap_pred_target_shp' containing computed targets,
