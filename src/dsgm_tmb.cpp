@@ -78,6 +78,12 @@ Type objective_function<Type>::operator() ()
   DATA_SCALAR(gamma_param1);
   DATA_SCALAR(gamma_param2);
 
+  // Rho penalty
+  DATA_INTEGER(use_rho_penalty);
+  DATA_INTEGER(rho_penalty_type);  // 1 = Gamma(shape,rate); 2 = Normal; 3 = Log-Normal on log_rho
+  DATA_SCALAR(rho_param1);
+  DATA_SCALAR(rho_param2);
+
   // Importance sampling
   DATA_INTEGER(compute_denominator_only);
   DATA_VECTOR(log_denominator_vals);  // length n_samples
@@ -321,6 +327,23 @@ Type objective_function<Type>::operator() ()
       // log_gamma is the raw TMB parameter so gradient is O(1) — preferred
       Type d = log_gamma - gamma_param1;
       penalty += Type(0.5) * d * d / (gamma_param2 * gamma_param2);
+    }
+  }
+
+  // --- Rho ---
+  if (use_rho_penalty == 1) {
+    if (rho_penalty_type == 1) {
+      // Gamma(shape, rate) on rho
+      penalty -= (rho_param1 - Type(1.0)) * log(rho);
+      penalty += rho_param2 * rho;
+    } else if (rho_penalty_type == 2) {
+      // Normal(mean, sd) on rho
+      Type d = rho - rho_param1;
+      penalty += Type(0.5) * d * d / (rho_param2 * rho_param2);
+    } else if (rho_penalty_type == 3) {
+      // Log-Normal: Normal(mu, sd) on log_rho — preferred, gradient O(1)
+      Type d = log_rho - rho_param1;
+      penalty += Type(0.5) * d * d / (rho_param2 * rho_param2);
     }
   }
 

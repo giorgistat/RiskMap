@@ -1801,83 +1801,254 @@ plot_score <- function(object, which_score, which_model, ...) {
   return(out)
 }
 
-##' @title Plot the estimated MDA impact function
-##'
-##' @description
-##' Generate a plot of the estimated impact of mass drug administration (MDA)
-##' on infection prevalence, based on a fitted decay-adjusted spatio-temporal (DAST) model.
-##' The function simulates draws from the posterior distribution of model parameters,
-##' propagates them through the MDA effect function, and produces uncertainty bands
-##' around the estimated impact curve.
-##'
-##' @param object A fitted DAST model object, returned by \code{\link{dast}}.
-##' @param mda_history Specification of the MDA schedule. This can be either:
-##'   \itemize{
-##'     \item A numeric vector of event times (integers starting at 0, e.g. \code{c(0,1,2,6)}),
-##'     \item OR a 0/1 indicator vector on the yearly grid (e.g. \code{c(1,1,1,0,0,0,1)}),
-##'     where position \code{i} corresponds to year \code{i-1}.
-##'   }
-##'   If omitted, the default is a single MDA at time 0.
-##' @param n_sim Number of posterior draws used for uncertainty quantification (default: 1000).
-##' @param x_min Minimum value for the x-axis (default: \code{1e-6}).
-##' @param x_max Maximum value for the x-axis (default: \code{10}).
-##' @param conf_level Confidence level for the pointwise uncertainty interval (default: 0.95).
-##' @param lower_f Optional lower bound for the y-axis. If not provided, computed from the data.
-##' @param upper_f Optional upper bound for the y-axis. If not provided, computed from the data.
-##' @param mc_cores Number of CPU cores to use for parallel simulation. Default is 1 (serial).
-##' @param parallel_backend Parallelisation backend to use. Options are \code{"none"} (default),
-##'   \code{"fork"} (Unix-like systems), or \code{"psock"} (cross-platform).
-##' @param ... Additional arguments (currently unused).
-##'
-##' @details
-##' The time axis is assumed to start at 0 and increase in integer steps of 1 year.
-##' The argument \code{mda_history} allows the user to specify when MDAs occurred either
-##' by listing the years directly or by giving a binary indicator on the yearly grid.
-##' The function then evaluates the cumulative relative reduction
-##' \eqn{1 - \mathrm{effect}(t)} at a dense grid of time points between \code{x_min}
-##' and \code{x_max}, using the fitted parameters from the supplied DAST model.
-##'
-##' @return
-##' A \code{ggplot2} object showing the median estimated MDA impact function
-##' and the pointwise uncertainty band at the chosen confidence level.
-##'
-##' @importFrom ggplot2 coord_cartesian geom_ribbon geom_line
-##' @export
-plot_mda <- function(object,
-                     mda_history  = NULL,   # numeric event times (integers, starting at 0) OR 0/1 vector on yearly grid
-                     n_sim        = 1000,
-                     x_min        = 1e-6,
-                     x_max        = 10,
-                     conf_level   = 0.95,
-                     lower_f      = NULL,
-                     upper_f      = NULL,
-                     mc_cores     = 1,
-                     parallel_backend = c("none","fork","psock"),
-                     ...) {
+#' Plot MDA impact for a fitted DSGM object
+#'
+#' Visualises the estimated temporal decay of worm burden following one or more
+#' MDA rounds, with uncertainty bands propagated from the estimated covariance
+#' of (delta, kappa). Optionally adds curves showing the implied reduction in
+#' prevalence for a set of user-specified baseline prevalence levels.
+#'
+#' @param object   A fitted RiskMap object of family \code{"intprev"}.
+#' @param mda_history  Numeric vector of MDA event times (years since baseline,
+#'   starting at 0), or a 0/1 vector on a yearly grid. Defaults to a single
+#'   round at time 0.
+#' @param show_prevalence Logical. If \code{TRUE}, adds a second panel showing
+#'   the relative reduction in prevalence for each baseline level in
+#'   \code{baseline_prev}. Default \code{FALSE}.
+#' @param baseline_prev  Numeric vector of baseline worm-burden prevalence
+#'   levels P(W>0) for which to show prevalence curves. Only used when
+#'   \code{show_prevalence = TRUE}. Default \code{c(0.10, 0.35, 0.65)}.
+#' @param n_sim      Number of Monte Carlo draws for uncertainty bands. Default 1000.
+#' @param x_min      Left limit of time axis (years). Default 1e-6.
+#' @param x_max      Right limit of time axis (years). Default 10.
+#' @param conf_level Confidence level for the uncertainty band. Default 0.95.
+#' @param ...        Further arguments (currently unused).
+#'
+#' @return A \code{ggplot} object (single panel) or a patchwork of two panels.
 
-  parallel_backend <- match.arg(parallel_backend)
+#' @export
+plot_mda <- function(object, ...) {
+  if (object$family %in% c("binomial", "dast")) {
+    return(plot_mda_dast(object, ...))
+  }
+  if (object$family == "intprev") {
+    return(plot_mda_intprev(object, ...))
+  }
+  stop(sprintf("plot_mda not implemented for family '%s'", object$family))
+}
 
-  # --- Time axis for evaluation ---
-  stopifnot(is.numeric(x_min), is.numeric(x_max), x_max > x_min)
-  survey_times <- seq(x_min, x_max, length.out = 200)
-  n_t <- length(survey_times)
+plot_mda_intprev <- function(object,
+                             mda_history      = NULL,
+                             show_prevalence  = FALSE,
+                             baseline_prev    = NULL,
+                             n_sim            = 1000,
+                             x_min            = 1e-6,
+                             x_max            = 10,
+                             conf_level       = 0.95,
+                             ...) {
 
-  # --- MDA schedule ---
-  if (is.null(mda_history)) {
-    mda_times <- 0
-  } else if (is.numeric(mda_history) && all(mda_history %in% c(0,1))) {
-    if (length(mda_history) == 0L) {
-      mda_times <- numeric(0)
-    } else {
-      mda_times <- which(mda_history == 1) - 1
-    }
-  } else if (is.numeric(mda_history)) {
-    mda_times <- sort(unique(as.numeric(mda_history)))
-  } else {
-    stop("`mda_history` must be numeric: either integer event times (0,1,2,...) or a 0/1 vector on that yearly grid.")
+  stopifnot(inherits(object, "RiskMap"))
+  stopifnot(object$family == "intprev")
+
+  library(ggplot2)
+  library(patchwork)
+
+  # -------------------------------------------------------------------------
+  # 1. Extract MDA parameters and their joint covariance
+  # -------------------------------------------------------------------------
+  mp   <- object$model_params
+  sdr  <- object$tmb_sdr
+
+  # delta = alpha_W (immediate worm burden reduction), kappa = gamma_W (recovery)
+  delta_hat <- mp$alpha_W   # in (0,1)
+  kappa_hat <- mp$gamma_W   # > 0
+  omega     <- mp$k         # NB aggregation parameter
+
+  # Locate MDA parameters on the transformed scale in tmb_sdr$par.fixed.
+  # Name variants depend on TMB model version.
+  par_names  <- names(sdr$par.fixed)
+  find_par   <- function(candidates) {
+    idx <- which(par_names %in% candidates)
+    if (length(idx) == 0)
+      stop(sprintf("Could not find any of {%s} in par.fixed names: {%s}",
+                   paste(candidates, collapse = ", "),
+                   paste(par_names,  collapse = ", ")))
+    idx[1]
   }
 
-  # --- Extract params ---
+  idx_delta <- find_par(c("logit_alpha", "logit_alpha_W"))
+  idx_kappa <- find_par(c("log_gamma",   "log_gamma_W"))
+  idx       <- c(idx_delta, idx_kappa)
+
+  Sigma_par  <- sdr$cov.fixed[idx, idx, drop = FALSE]
+  par_hat_t  <- c(sdr$par.fixed[idx_delta], sdr$par.fixed[idx_kappa])
+
+  # Cholesky factor for simulation
+  Sigma_root <- t(chol(Sigma_par))
+  par_sim <- t(replicate(n_sim, par_hat_t + as.numeric(Sigma_root %*% rnorm(2))))
+
+  deltas <- plogis(par_sim[, 1])   # logit  -> (0,1)
+  kappas <- exp(par_sim[, 2])      # log    -> (0,inf)
+
+  # -------------------------------------------------------------------------
+  # 2. Parse MDA schedule
+  # -------------------------------------------------------------------------
+  if (is.null(mda_history)) {
+    mda_times <- 0
+  } else if (all(mda_history %in% c(0, 1))) {
+    mda_times <- which(mda_history == 1) - 1
+  } else {
+    mda_times <- sort(unique(as.numeric(mda_history)))
+  }
+
+  # -------------------------------------------------------------------------
+  # 3. phi(t): relative worm burden remaining after all MDA rounds
+  # -------------------------------------------------------------------------
+  t_seq <- seq(x_min, x_max, length.out = 300)
+
+  phi_fun <- function(t, delta, kappa) {
+    # product over MDA rounds administered before t
+    past <- mda_times[mda_times < t]
+    if (length(past) == 0) return(1)
+    prod(1 - delta * exp(-(t - past) / kappa))
+  }
+  phi_fun <- Vectorize(phi_fun, "t")
+
+  # Matrix: rows = time points, cols = MC draws
+  phi_mat <- mapply(function(d, k) phi_fun(t_seq, d, k),
+                    deltas, kappas)       # 300 x n_sim
+
+  alpha_q   <- (1 - conf_level) / 2
+  wb_med    <- apply(phi_mat, 1, median)
+  wb_lower  <- apply(phi_mat, 1, quantile, probs = alpha_q)
+  wb_upper  <- apply(phi_mat, 1, quantile, probs = 1 - alpha_q)
+
+  df_wb <- data.frame(
+    time  = t_seq,
+    med   = wb_med,
+    lower = wb_lower,
+    upper = wb_upper
+  )
+
+  # -------------------------------------------------------------------------
+  # 4. Panel A: relative worm burden
+  # -------------------------------------------------------------------------
+  p_wb <- ggplot(df_wb, aes(x = time)) +
+    geom_ribbon(aes(ymin = (1 - upper) * 100,
+                    ymax = (1 - lower) * 100),
+                fill = "steelblue", alpha = 0.25) +
+    geom_line(aes(y = (1 - med) * 100),
+              colour = "steelblue", linewidth = 1) +
+    geom_vline(xintercept = mda_times,
+               linetype = "dashed", colour = "grey40", linewidth = 0.5) +
+    scale_y_continuous(limits = c(0, 100)) +
+    labs(x = "Years since baseline",
+         y = "Worm burden reduction (%)") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+
+  if (!show_prevalence) return(p_wb)
+
+  # -------------------------------------------------------------------------
+  # 5. Panel B: prevalence impact at different baseline levels
+  #
+  # P(W > 0 | mu) = 1 - [omega / (omega + mu)]^omega
+  # Invert to get mu_0 from baseline prevalence p_0:
+  #   mu_0 = omega * [(1 - p_0)^(-1/omega) - 1]
+  # Post-MDA:
+  #   mu(t) = mu_0 * phi(t)
+  #   p(t)  = 1 - [omega / (omega + mu(t))]^omega
+  # -------------------------------------------------------------------------
+  prev_from_mu <- function(mu, omega)
+    1 - (omega / (omega + mu))^omega
+
+  mu_from_prev <- function(p0, omega)
+    omega * ((1 - p0)^(-1 / omega) - 1)
+
+  prev_colours <- c("#2166AC", "#F4A582", "#B2182B",
+                    "#1B7837", "#762A83", "#E66101")[
+                      seq_along(baseline_prev)]
+
+  prev_list <- lapply(seq_along(baseline_prev), function(j) {
+    p0  <- baseline_prev[j]
+    mu0 <- mu_from_prev(p0, omega)
+
+    # For each MC draw compute relative prevalence over time
+    prev_mat <- matrix(NA_real_, nrow = length(t_seq), ncol = n_sim)
+    for (s in seq_len(n_sim)) {
+      mu_t        <- mu0 * phi_mat[, s]
+      prev_mat[, s] <- prev_from_mu(mu_t, omega) / p0 * 100
+    }
+
+    data.frame(
+      time  = t_seq,
+      med   = apply(prev_mat, 1, median),
+      lower = apply(prev_mat, 1, quantile, probs = alpha_q),
+      upper = apply(prev_mat, 1, quantile, probs = 1 - alpha_q),
+      label = sprintf("p* = %d%%", round(p0 * 100))
+    )
+  })
+  df_prev <- do.call(rbind, prev_list)
+  df_prev$label <- factor(df_prev$label,
+                          levels = sprintf("p* = %d%%",
+                                           round(baseline_prev * 100)))
+
+  p_prev <- ggplot(df_prev, aes(x = time, colour = label, fill = label)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15,
+                colour = NA) +
+    geom_line(aes(y = med), linewidth = 0.9) +
+    geom_vline(xintercept = mda_times,
+               linetype = "dashed", colour = "grey40", linewidth = 0.5) +
+    scale_colour_manual(values = prev_colours, name = "Baseline prev.") +
+    scale_fill_manual(values   = prev_colours, name = "Baseline prev.") +
+    scale_y_continuous(limits = c(0, 100)) +
+    labs(x = "Years since baseline",
+         y = "Prevalence relative to baseline (%)") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank(),
+          legend.position  = "bottom")
+
+
+  # -------------------------------------------------------------------------
+  # 6. Return separate plots
+  # -------------------------------------------------------------------------
+  return(list(
+    worm_burden = p_wb,
+    prevalence  = p_prev
+  ))
+}
+
+# -----------------------------------------------------------------------------
+# DAST wrapper — delegates to the original plot_mda logic for binomial models
+# -----------------------------------------------------------------------------
+plot_mda_dast <- function(object,
+                          mda_history      = NULL,
+                          n_sim            = 1000,
+                          x_min            = 1e-6,
+                          x_max            = 10,
+                          conf_level       = 0.95,
+                          lower_f          = NULL,
+                          upper_f          = NULL,
+                          ...) {
+
+  stopifnot(inherits(object, "RiskMap"))
+  # object$family assumed "binomial" or "dast" given wrapper logic
+
+  library(ggplot2)
+
+  survey_times <- seq(x_min, x_max, length.out = 200)
+  n_t          <- length(survey_times)
+
+  # ---- MDA schedule parsing (same logic as intprev) ----
+  if (is.null(mda_history)) {
+    mda_times <- 0
+  } else if (all(mda_history %in% c(0, 1))) {
+    mda_times <- which(mda_history == 1) - 1
+  } else {
+    mda_times <- sort(unique(as.numeric(mda_history)))
+  }
+
+  # ---- parameter simulation ----
   par_hat   <- coef(object)
   n_par     <- length(object$estimate)
   power_val <- object$power_val
@@ -1897,91 +2068,65 @@ plot_mda <- function(object,
 
   Sigma_par       <- as.matrix(object$covariance[ind_dast, ind_dast])
   Sigma_par_sroot <- t(chol(Sigma_par))
+
   par_hat_sim <- t(vapply(
-    X   = seq_len(n_sim),
-    FUN = function(i) par_dast + Sigma_par_sroot %*% stats::rnorm(length(ind_dast)),
-    FUN.VALUE = numeric(length(ind_dast))
+    seq_len(n_sim),
+    function(i) par_dast + Sigma_par_sroot %*% stats::rnorm(length(ind_dast)),
+    numeric(length(ind_dast))
   ))
 
   alphas <- if (has_alpha) plogis(par_hat_sim[, 1]) else rep(alpha_fixed, n_sim)
-  gammas <- if (has_alpha) exp(par_hat_sim[, 2]) else exp(par_hat_sim[, 1])
+  gammas <- if (has_alpha) exp(par_hat_sim[, 2])    else exp(par_hat_sim[, 1])
 
-  # --- Simulate effects ---
-  if (length(mda_times) == 0L) {
-    effects_mat <- matrix(0, nrow = n_t, ncol = n_sim)
-  } else {
-    intervention_mat <- matrix(1, nrow = n_t, ncol = length(mda_times))
+  intervention_mat <- matrix(1, nrow = n_t, ncol = length(mda_times))
 
-    one_sim <- function(j) {
-      eff <- compute_mda_effect(
-        survey_times_data = survey_times,
-        mda_times         = mda_times,
-        intervention      = intervention_mat,
-        alpha             = alphas[j],
-        gamma             = gammas[j],
-        kappa             = power_val
-      )
-      1 - eff
-    }
-
-    if (parallel_backend == "none" || mc_cores <= 1L) {
-      eff_list <- lapply(seq_len(n_sim), one_sim)
-    } else if (parallel_backend == "fork" && .Platform$OS.type == "unix") {
-      mc_cores <- as.integer(max(1L, min(mc_cores, parallel::detectCores(logical = TRUE) - 1L, n_sim)))
-      eff_list <- parallel::mclapply(seq_len(n_sim), one_sim,
-                                     mc.cores = mc_cores, mc.preschedule = TRUE)
-    } else if (parallel_backend == "psock") {
-      mc_cores <- as.integer(max(1L, min(mc_cores, parallel::detectCores(logical = TRUE), n_sim)))
-      cl <- parallel::makeCluster(mc_cores, type = "PSOCK")
-      on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
-      parallel::clusterExport(cl,
-                              varlist = c("survey_times","mda_times","intervention_mat","alphas","gammas","power_val","one_sim"),
-                              envir = environment())
-      eff_list <- parallel::parLapply(cl, seq_len(n_sim), one_sim)
-    } else {
-      eff_list <- lapply(seq_len(n_sim), one_sim)
-    }
-
-    effects_mat <- do.call(cbind, eff_list)
+  one_sim <- function(j) {
+    eff <- compute_mda_effect(
+      survey_times_data = survey_times,
+      mda_times         = mda_times,
+      intervention      = intervention_mat,
+      alpha             = alphas[j],
+      gamma             = gammas[j],
+      kappa             = power_val
+    )
+    # eff is typically "remaining fraction"; you currently plot 1-eff
+    1 - eff
   }
 
-  # --- Summaries ---
+  effects_mat <- do.call(cbind, lapply(seq_len(n_sim), one_sim))
+
   alpha_q <- (1 - conf_level) / 2
-  med   <- apply(effects_mat, 1, stats::median,   na.rm = TRUE)
-  lower <- apply(effects_mat, 1, stats::quantile, probs = alpha_q, na.rm = TRUE)
-  upper <- apply(effects_mat, 1, stats::quantile, probs = 1 - alpha_q, na.rm = TRUE)
+  med     <- apply(effects_mat, 1, stats::median,   na.rm = TRUE)
+  lower   <- apply(effects_mat, 1, stats::quantile, probs = alpha_q,     na.rm = TRUE)
+  upper   <- apply(effects_mat, 1, stats::quantile, probs = 1 - alpha_q, na.rm = TRUE)
 
-  in_view <- survey_times >= x_min & survey_times <= x_max
-  if (!any(in_view)) in_view <- rep(TRUE, length(survey_times))
-
-  if (is.null(lower_f)) lower_f <- min(lower[in_view], na.rm = TRUE)
-  if (is.null(upper_f)) upper_f <- max(upper[in_view], na.rm = TRUE)
-
+  # convert to percent to match plot_mda_dsgm conventions
   plot_data <- data.frame(
     time   = survey_times,
-    median = med,
-    lower  = lower,
-    upper  = upper
+    median = med   * 100,
+    lower  = lower * 100,
+    upper  = upper * 100
   )
 
-  p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = time)) +
-    ggplot2::geom_ribbon(ggplot2::aes(ymin = lower, ymax = upper),
-                         fill = "grey70", alpha = 0.3) +
-    ggplot2::geom_line(ggplot2::aes(y = median),
-                       color = "black", linewidth = 1) +
-    ggplot2::labs(
+  # default y-limits like DSGM: 0..100, unless user overrides
+  if (is.null(lower_f)) lower_f <- 0
+  if (is.null(upper_f)) upper_f <- 100
+
+  ggplot(plot_data, aes(x = time)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper),
+                fill = "steelblue", alpha = 0.25) +
+    geom_line(aes(y = median),
+              colour = "steelblue", linewidth = 1) +
+    geom_vline(xintercept = mda_times,
+               linetype = "dashed", colour = "grey40", linewidth = 0.5) +
+    scale_y_continuous(limits = c(lower_f, upper_f)) +
+    coord_cartesian(xlim = c(x_min, x_max)) +
+    labs(
       x = "Years since baseline",
-      y = "Relative reduction from baseline prevalence",
-      title = "MDA Impact Over Time"
+      y = "Prevalence reduction (%)"
     ) +
-    ggplot2::coord_cartesian(xlim = c(x_min, x_max), ylim = c(lower_f, upper_f)) +
-    ggplot2::theme_minimal()
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
 
-  # --- Add vertical dashed lines for MDA times ---
-  if (length(mda_times) > 0) {
-    p <- p + ggplot2::geom_vline(xintercept = mda_times,
-                                 linetype = "dashed", color = "red", alpha = 0.7)
-  }
 
-  return(p)
 }

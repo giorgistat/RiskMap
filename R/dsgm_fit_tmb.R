@@ -109,6 +109,36 @@ convert_penalty_to_tmb <- function(penalty) {
     tmb_penalty$gamma_param2       <- 1
   }
 
+  # ===========================================================================
+  # RHO PENALTY
+  # ===========================================================================
+  tmb_penalty$rho_penalty_type <- 3
+  tmb_penalty$rho_param1       <- 0   # log-scale mean
+  tmb_penalty$rho_param2       <- 1   # log-scale sd
+
+  if (!is.null(penalty$rho_type)) {
+    tmb_penalty$use_rho_penalty <- 1
+    if (penalty$rho_type == "gamma") {
+      tmb_penalty$rho_penalty_type <- 1
+      tmb_penalty$rho_param1       <- penalty$rho_shape
+      tmb_penalty$rho_param2       <- penalty$rho_rate
+    } else if (penalty$rho_type == "normal") {
+      tmb_penalty$rho_penalty_type <- 2
+      tmb_penalty$rho_param1       <- penalty$rho_mean
+      tmb_penalty$rho_param2       <- penalty$rho_sd
+    } else if (penalty$rho_type == "lognormal") {
+      tmb_penalty$rho_penalty_type <- 3
+      tmb_penalty$rho_param1       <- penalty$rho_mean  # mean of log(rho)
+      tmb_penalty$rho_param2       <- penalty$rho_sd    # sd of log(rho)
+    }
+  } else if (!is.null(penalty$rho_mean) && !is.null(penalty$rho_sd)) {
+    # Convenience: infer log-normal if mean/sd given without type
+    tmb_penalty$use_rho_penalty  <- 1
+    tmb_penalty$rho_penalty_type <- 3
+    tmb_penalty$rho_param1       <- penalty$rho_mean
+    tmb_penalty$rho_param2       <- penalty$rho_sd
+  }
+
   return(tmb_penalty)
 }
 
