@@ -31,7 +31,11 @@ convert_penalty_to_tmb <- function(penalty) {
     use_gamma_penalty  = 0,
     gamma_penalty_type = 1,
     gamma_param1       = 2,
-    gamma_param2       = 1
+    gamma_param2       = 1,
+    use_rho_penalty    = 0,   # <- missing
+    rho_penalty_type   = 3,
+    rho_param1         = 0,
+    rho_param2         = 1
   )
 
   if (is.null(penalty)) return(tmb_penalty)
@@ -112,9 +116,6 @@ convert_penalty_to_tmb <- function(penalty) {
   # ===========================================================================
   # RHO PENALTY
   # ===========================================================================
-  tmb_penalty$rho_penalty_type <- 3
-  tmb_penalty$rho_param1       <- 0   # log-scale mean
-  tmb_penalty$rho_param2       <- 1   # log-scale sd
 
   if (!is.null(penalty$rho_type)) {
     tmb_penalty$use_rho_penalty <- 1
@@ -266,6 +267,10 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
       gamma_penalty_type       = tmb_penalty$gamma_penalty_type,
       gamma_param1             = tmb_penalty$gamma_param1,
       gamma_param2             = tmb_penalty$gamma_param2,
+      use_rho_penalty          = tmb_penalty$use_rho_penalty,
+      rho_penalty_type         = tmb_penalty$rho_penalty_type,
+      rho_param1               = tmb_penalty$rho_param1,
+      rho_param2               = tmb_penalty$rho_param2,
       compute_denominator_only = as.integer(compute_denom),
       log_denominator_vals     = log_denom_vals,
       intensity_family         = as.integer(intensity_family)
@@ -339,6 +344,19 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
       # Log-Normal: penalty lives on log(gamma_W)
       d <- log(par0$gamma_W) - tmb_penalty$gamma_param1
       expected_penalty <- expected_penalty + 0.5 * d^2 / tmb_penalty$gamma_param2^2
+    }
+  }
+  if (tmb_penalty$use_rho_penalty == 1) {
+    if (tmb_penalty$rho_penalty_type == 1) {
+      expected_penalty <- expected_penalty -
+        (tmb_penalty$rho_param1 - 1) * log(par0$rho) +
+        tmb_penalty$rho_param2 * par0$rho
+    } else if (tmb_penalty$rho_penalty_type == 2) {
+      d <- par0$rho - tmb_penalty$rho_param1
+      expected_penalty <- expected_penalty + 0.5 * d^2 / tmb_penalty$rho_param2^2
+    } else if (tmb_penalty$rho_penalty_type == 3) {
+      d <- log(par0$rho) - tmb_penalty$rho_param1
+      expected_penalty <- expected_penalty + 0.5 * d^2 / tmb_penalty$rho_param2^2
     }
   }
   if (abs(obj_at_par0 - expected_penalty) > 0.1)

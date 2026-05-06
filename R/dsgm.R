@@ -350,7 +350,7 @@ dsgm_initial_value <- function(y_prev, intensity_data, D, coords, ID_coords,
   n <- length(y_prev)
   p <- ncol(D)
 
-  .pen <- function(alpha_W, gamma_W) {
+  .pen <- function(alpha_W, gamma_W, rho) {
     pen <- 0
     if (!is.null(penalty)) {
       if (is.null(fix_alpha_W)) {
@@ -379,6 +379,17 @@ dsgm_initial_value <- function(y_prev, intensity_data, D, coords, ID_coords,
           d <- gamma_W - penalty$gamma_mean
           pen <- pen + 0.5 * d^2 / penalty$gamma_sd^2
         }
+      }
+    }
+    if (!is.null(penalty$rho_type)) {
+      if (penalty$rho_type == "gamma") {
+        pen <- pen - (penalty$rho_mean - 1) * log(rho) + penalty$rho_sd * rho
+      } else if (penalty$rho_type == "normal") {
+        d <- rho - penalty$rho_mean
+        pen <- pen + 0.5 * d^2 / penalty$rho_sd^2
+      } else if (penalty$rho_type == "lognormal") {
+        d <- log(rho) - penalty$rho_mean
+        pen <- pen + 0.5 * d^2 / penalty$rho_sd^2
       }
     }
     pen
@@ -410,7 +421,7 @@ dsgm_initial_value <- function(y_prev, intensity_data, D, coords, ID_coords,
     li[!is.finite(li)] <- -1e10
     ll <- ll + sum(li)
 
-    nll <- -(ll - .pen(alpha_W, gamma_W))
+    nll <- -(ll - .pen(alpha_W, gamma_W, rho))
     if (!is.finite(nll) || nll > 1e10) 1e10 else nll
   }
 
@@ -541,110 +552,6 @@ dsgm_initial_value_lf <- function(y_counts, units_m, which_diag, D, coords,
 
   list(beta = beta_e, k = k_e, rho = rho_e, gamma_sens = gamma_sens,
        sigma2 = s2_0, phi = phi_0, tau2 = tau2_0, alpha_W = aW_e, gamma_W = gW_e)
-}
-
-
-# =============================================================================
-# Penalty conversion
-# =============================================================================
-
-##' @title Compile and load the dsgm_mdiag TMB template on first use
-##' @keywords internal
-.load_dsgm_mdiag <- function(messages = TRUE) {
-  if (isTRUE(.dsgm_cache$mdiag_loaded)) return(invisible(NULL))
-
-  cpp_file <- system.file("tmb/dsgm_mdiag.cpp", package = "RiskMap")
-  if (!file.exists(cpp_file))
-    stop("TMB template not found: inst/tmb/dsgm_mdiag.cpp")
-
-  if (messages)
-    message("Compiling dsgm_mdiag TMB template (first use this session)...")
-
-  TMB::compile(cpp_file, silent = !messages)
-  dyn.load(TMB::dynlib(tools::file_path_sans_ext(cpp_file)))
-
-  .dsgm_cache$mdiag_loaded <- TRUE
-  if (messages) message("dsgm_mdiag compiled and loaded.")
-  invisible(NULL)
-}
-
-
-##' @title Convert penalty list to TMB format
-##' @keywords internal
-convert_penalty_to_tmb <- function(penalty) {
-
-  tmb_penalty <- list(
-    use_alpha_penalty  = 0,
-    alpha_penalty_type = 1,
-    alpha_param1       = 2,
-    alpha_param2       = 2,
-    use_gamma_penalty  = 0,
-    gamma_penalty_type = 1,
-    gamma_param1       = 2,
-    gamma_param2       = 1
-  )
-
-  if (is.null(penalty)) return(tmb_penalty)
-
-  # --- Alpha ---
-  if (!is.null(penalty$alpha_param1) && !is.null(penalty$alpha_param2)) {
-    tmb_penalty$use_alpha_penalty  <- 1
-    tmb_penalty$alpha_penalty_type <- 1
-    tmb_penalty$alpha_param1       <- penalty$alpha_param1
-    tmb_penalty$alpha_param2       <- penalty$alpha_param2
-  } else if (!is.null(penalty$alpha) && is.function(penalty$alpha)) {
-    tmb_penalty$use_alpha_penalty  <- 1
-    tmb_penalty$alpha_penalty_type <- 1
-    if (!is.null(penalty$alpha_grad)) {
-      grad_val  <- penalty$alpha_grad(0.5)
-      a_minus_1 <- -grad_val / 2
-      tmb_penalty$alpha_param1 <- a_minus_1 + 1
-      tmb_penalty$alpha_param2 <- a_minus_1 + 1
-    } else {
-      warning("Could not infer Beta parameters from alpha function. Using Beta(2,2).")
-      tmb_penalty$alpha_param1 <- 2
-      tmb_penalty$alpha_param2 <- 2
-    }
-  }
-
-  # --- Gamma_W ---
-  if (!is.null(penalty$gamma_type)) {
-    tmb_penalty$use_gamma_penalty <- 1
-    if (penalty$gamma_type == "gamma") {
-      tmb_penalty$gamma_penalty_type <- 1
-      tmb_penalty$gamma_param1       <- penalty$gamma_shape
-      tmb_penalty$gamma_param2       <- penalty$gamma_rate
-    } else if (penalty$gamma_type == "normal") {
-      tmb_penalty$gamma_penalty_type <- 2
-      tmb_penalty$gamma_param1       <- penalty$gamma_mean
-      tmb_penalty$gamma_param2       <- penalty$gamma_sd
-    } else if (penalty$gamma_type == "lognormal") {
-      tmb_penalty$gamma_penalty_type <- 3
-      tmb_penalty$gamma_param1       <- penalty$gamma_mean  # mu on log scale
-      tmb_penalty$gamma_param2       <- penalty$gamma_sd    # sd on log scale
-    } else {
-      warning(sprintf("Unknown gamma_type '%s'. No gamma penalty applied.", penalty$gamma_type))
-      tmb_penalty$use_gamma_penalty <- 0
-    }
-  } else if (!is.null(penalty$gamma_shape) && !is.null(penalty$gamma_rate)) {
-    tmb_penalty$use_gamma_penalty  <- 1
-    tmb_penalty$gamma_penalty_type <- 1
-    tmb_penalty$gamma_param1       <- penalty$gamma_shape
-    tmb_penalty$gamma_param2       <- penalty$gamma_rate
-  } else if (!is.null(penalty$gamma_mean) && !is.null(penalty$gamma_sd)) {
-    tmb_penalty$use_gamma_penalty  <- 1
-    tmb_penalty$gamma_penalty_type <- 2
-    tmb_penalty$gamma_param1       <- penalty$gamma_mean
-    tmb_penalty$gamma_param2       <- penalty$gamma_sd
-  } else if (!is.null(penalty$gamma) && is.function(penalty$gamma)) {
-    warning("Using function-based gamma penalty. Defaulting to Gamma(2,1).")
-    tmb_penalty$use_gamma_penalty  <- 1
-    tmb_penalty$gamma_penalty_type <- 1
-    tmb_penalty$gamma_param1       <- 2
-    tmb_penalty$gamma_param2       <- 1
-  }
-
-  return(tmb_penalty)
 }
 
 
