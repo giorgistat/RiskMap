@@ -32,10 +32,15 @@ convert_penalty_to_tmb <- function(penalty) {
     gamma_penalty_type = 1,
     gamma_param1       = 2,
     gamma_param2       = 1,
-    use_rho_penalty    = 0,   # <- missing
+    use_rho_penalty    = 0,
     rho_penalty_type   = 3,
     rho_param1         = 0,
-    rho_param2         = 1
+    rho_param2         = 1,
+    # omega1 penalty (active only when vary_k = TRUE)
+    use_omega1_penalty  = 0,
+    omega1_penalty_type = 1,   # 1 = Normal(mean, sd) on omega1
+    omega1_param1       = 0.5, # prior mean for omega1
+    omega1_param2       = 0.5  # prior sd for omega1
   )
 
   if (is.null(penalty)) return(tmb_penalty)
@@ -82,11 +87,9 @@ convert_penalty_to_tmb <- function(penalty) {
       tmb_penalty$gamma_param2       <- penalty$gamma_sd
 
     } else if (penalty$gamma_type == "lognormal") {
-      # Log-Normal: Normal(mean, sd) on log(gamma_W)
-      # gradient at theta_0 is O(1) vs O(gamma_W) for Gamma prior
       tmb_penalty$gamma_penalty_type <- 3
-      tmb_penalty$gamma_param1       <- penalty$gamma_mean  # mu on log scale
-      tmb_penalty$gamma_param2       <- penalty$gamma_sd    # sd on log scale
+      tmb_penalty$gamma_param1       <- penalty$gamma_mean
+      tmb_penalty$gamma_param2       <- penalty$gamma_sd
 
     } else {
       warning(sprintf("Unknown gamma_type '%s'. No gamma penalty applied.", penalty$gamma_type))
@@ -102,7 +105,7 @@ convert_penalty_to_tmb <- function(penalty) {
   } else if (!is.null(penalty$gamma_mean) && !is.null(penalty$gamma_sd)) {
     warning("gamma_type not specified; defaulting to 'lognormal'. Set gamma_type explicitly.")
     tmb_penalty$use_gamma_penalty  <- 1
-    tmb_penalty$gamma_penalty_type <- 3        # lognormal — consistent with convention
+    tmb_penalty$gamma_penalty_type <- 3
     tmb_penalty$gamma_param1       <- penalty$gamma_mean
     tmb_penalty$gamma_param2       <- penalty$gamma_sd
   } else if (!is.null(penalty$gamma) && is.function(penalty$gamma)) {
@@ -116,7 +119,6 @@ convert_penalty_to_tmb <- function(penalty) {
   # ===========================================================================
   # RHO PENALTY
   # ===========================================================================
-
   if (!is.null(penalty$rho_type)) {
     tmb_penalty$use_rho_penalty <- 1
     if (penalty$rho_type == "gamma") {
@@ -129,15 +131,26 @@ convert_penalty_to_tmb <- function(penalty) {
       tmb_penalty$rho_param2       <- penalty$rho_sd
     } else if (penalty$rho_type == "lognormal") {
       tmb_penalty$rho_penalty_type <- 3
-      tmb_penalty$rho_param1       <- penalty$rho_mean  # mean of log(rho)
-      tmb_penalty$rho_param2       <- penalty$rho_sd    # sd of log(rho)
+      tmb_penalty$rho_param1       <- penalty$rho_mean
+      tmb_penalty$rho_param2       <- penalty$rho_sd
     }
   } else if (!is.null(penalty$rho_mean) && !is.null(penalty$rho_sd)) {
-    # Convenience: infer log-normal if mean/sd given without type
     tmb_penalty$use_rho_penalty  <- 1
     tmb_penalty$rho_penalty_type <- 3
     tmb_penalty$rho_param1       <- penalty$rho_mean
     tmb_penalty$rho_param2       <- penalty$rho_sd
+  }
+
+  # ===========================================================================
+  # OMEGA1 PENALTY  (slope of log(omega) on log(mu_W); only used when vary_k=TRUE)
+  # ===========================================================================
+  # Specified as penalty$omega1_mean and penalty$omega1_sd for a Normal prior
+  # on the slope omega1. If not specified, no penalty is applied on omega1.
+  if (!is.null(penalty$omega1_mean) && !is.null(penalty$omega1_sd)) {
+    tmb_penalty$use_omega1_penalty  <- 1
+    tmb_penalty$omega1_penalty_type <- 1
+    tmb_penalty$omega1_param1       <- penalty$omega1_mean
+    tmb_penalty$omega1_param2       <- penalty$omega1_sd
   }
 
   return(tmb_penalty)
@@ -146,6 +159,15 @@ convert_penalty_to_tmb <- function(penalty) {
 
 ##' @title Fit DSGM using TMB
 ##' @description MCML estimation using TMB for automatic differentiation.
+##'
+##' @param vary_k Logical. If \code{FALSE} (default), the aggregation parameter
+##'   omega is constant across all observations. If \code{TRUE}, omega varies
+##'   with mean worm burden according to
+##'   \eqn{\log(\omega_i) = \omega_0 + \omega_1 \log(\mu_{W,i})},
+##'   adding one additional parameter \eqn{\omega_1} (the slope). This is
+##'   motivated by the empirical Coffeng relationship observed in survey data.
+##' @param omega1_start Starting value for \eqn{\omega_1} when \code{vary_k = TRUE}.
+##'   Defaults to 0.5 (consistent with the Kenya hookworm data analysis).
 ##' @param intensity_family Integer; 0 = shifted Gamma (default), 1 = zero-truncated NegBin.
 ##' @keywords internal
 ##' @importFrom TMB MakeADFun sdreport
@@ -164,7 +186,6 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
                          fix_gamma_W       = NULL,
                          penalty           = NULL,
                          S_samples_obj,
-                         # lf_mdiag-specific
                          model             = "sth",
                          y_counts          = NULL,
                          units_m           = NULL,
@@ -173,7 +194,9 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
                          fix_k             = NULL,
                          fix_tau2          = NULL,
                          use_mda           = TRUE,
-                         intensity_family  = 0L,    # 0 = shifted Gamma, 1 = zero-trunc NegBin
+                         intensity_family  = 0L,
+                         vary_k            = FALSE,
+                         omega1_start      = 0.5,
                          use_hessian_refinement = TRUE,
                          messages          = TRUE) {
 
@@ -212,6 +235,8 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
   S_samples <- S_samples_obj$S_samples
   pos_idx   <- which(y_prev == 1) - 1L   # 0-indexed
 
+  vary_k_int <- as.integer(vary_k)
+
   if (messages) message("Preprocessing sparse MDA matrix...")
   mda_sparse_idx <- which(int_mat > 0, arr.ind = TRUE)
   if (nrow(mda_sparse_idx) > 0) {
@@ -241,7 +266,7 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
 
   tmb_penalty <- convert_penalty_to_tmb(penalty)
 
-  # Helper: build TMB data list, varying only the IS fields
+  # Helper: build TMB data list
   make_data <- function(compute_denom, log_denom_vals) {
     list(
       y_prev                   = y_prev,
@@ -271,11 +296,19 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
       rho_penalty_type         = tmb_penalty$rho_penalty_type,
       rho_param1               = tmb_penalty$rho_param1,
       rho_param2               = tmb_penalty$rho_param2,
+      use_omega1_penalty       = tmb_penalty$use_omega1_penalty,
+      omega1_penalty_type      = tmb_penalty$omega1_penalty_type,
+      omega1_param1            = tmb_penalty$omega1_param1,
+      omega1_param2            = tmb_penalty$omega1_param2,
       compute_denominator_only = as.integer(compute_denom),
       log_denominator_vals     = log_denom_vals,
-      intensity_family         = as.integer(intensity_family)
+      intensity_family         = as.integer(intensity_family),
+      vary_k                   = vary_k_int
     )
   }
+
+  # Starting value for omega1: use par0$omega1 if supplied, else omega1_start
+  omega1_init <- if (!is.null(par0$omega1)) par0$omega1 else omega1_start
 
   parameters <- list(
     beta        = par0$beta,
@@ -284,10 +317,18 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
     logit_alpha = qlogis(par0$alpha_W),
     log_gamma   = log(par0$gamma_W),
     log_sigma2  = log(par0$sigma2),
-    log_phi     = log(par0$phi)
+    log_phi     = log(par0$phi),
+    omega1      = omega1_init   # slope on log(mu_W); fixed at 0 when vary_k=FALSE
   )
 
   map_list <- list()
+
+  # Map omega1 to NA (fixed at initial value = 0) when vary_k = FALSE
+  if (!vary_k) {
+    parameters$omega1 <- 0.0
+    map_list$omega1   <- factor(NA)
+  }
+
   if (!use_mda) {
     map_list$logit_alpha <- factor(NA)
     map_list$log_gamma   <- factor(NA)
@@ -303,7 +344,7 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
   }
   tmb_map <- if (length(map_list) > 0) map_list else NULL
 
-  # --- Pass 1: denominator at theta_0 (no penalties) ---
+  # --- Pass 1: denominator at theta_0 ---
   obj_d <- TMB::MakeADFun(
     data       = make_data(1L, numeric(nrow(S_samples))),
     parameters = parameters,
@@ -341,7 +382,6 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
       d <- par0$gamma_W - tmb_penalty$gamma_param1
       expected_penalty <- expected_penalty + 0.5 * d^2 / tmb_penalty$gamma_param2^2
     } else if (tmb_penalty$gamma_penalty_type == 3) {
-      # Log-Normal: penalty lives on log(gamma_W)
       d <- log(par0$gamma_W) - tmb_penalty$gamma_param1
       expected_penalty <- expected_penalty + 0.5 * d^2 / tmb_penalty$gamma_param2^2
     }
@@ -359,6 +399,12 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
       expected_penalty <- expected_penalty + 0.5 * d^2 / tmb_penalty$rho_param2^2
     }
   }
+  # omega1 penalty contribution at theta_0 (omega1_init)
+  if (vary_k && tmb_penalty$use_omega1_penalty == 1) {
+    d <- omega1_init - tmb_penalty$omega1_param1
+    expected_penalty <- expected_penalty + 0.5 * d^2 / tmb_penalty$omega1_param2^2
+  }
+
   if (abs(obj_at_par0 - expected_penalty) > 0.1)
     stop("SANITY CHECK FAILED: NLL at theta_0 != penalty. Check denominator computation.")
 
@@ -374,19 +420,24 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
   sdr     <- TMB::sdreport(obj)
   par_est <- summary(sdr, "report")
 
+  # Extract omega1 from ADREPORT (always present; = 0 with NA SE when fixed)
+  omega1_est <- par_est["omega1", "Estimate"]
+  omega1_se  <- par_est["omega1", "Std. Error"]
+
   result <- list(
     params = c(
       list(
         beta   = obj$env$parList()$beta,
-        k      = par_est["k",      "Estimate"],
-        rho    = par_est["rho",    "Estimate"],
+        k      = par_est["k", "Estimate"],
+        rho    = par_est["rho", "Estimate"],
         sigma2 = par_est["sigma2", "Estimate"],
-        phi    = par_est["phi",    "Estimate"]
+        phi    = par_est["phi", "Estimate"]
       ),
       if (use_mda) list(
         alpha_W = par_est["alpha_W", "Estimate"],
         gamma_W = par_est["gamma_W", "Estimate"]
-      )
+      ),
+      if (vary_k) list(omega1 = omega1_est)
     ),
     params_se = c(
       list(
@@ -399,8 +450,10 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
       if (use_mda) list(
         alpha_W = par_est["alpha_W", "Std. Error"],
         gamma_W = par_est["gamma_W", "Std. Error"]
-      )
+      ),
+      if (vary_k) list(omega1 = omega1_se)
     ),
+    vary_k           = vary_k,
     convergence      = opt$convergence,
     log_likelihood   = -opt$objective,
     message          = opt$message,
@@ -417,6 +470,7 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
 
 # =============================================================================
 # Internal: TMB-MCML engine for the LF multi-diagnostic model
+# (unchanged — vary_k not applicable to the LF model)
 # =============================================================================
 
 ##' @keywords internal
@@ -570,6 +624,7 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
   list(
     params            = params,
     params_se         = params_se,
+    vary_k            = FALSE,
     convergence       = opt$convergence,
     log_likelihood    = -opt$objective,
     message           = opt$message,

@@ -130,8 +130,8 @@ dast_initial_value <- function(y, D, units_m, int_mat, survey_times_data,
     prob <- fact*prob_star
 
     # Apply penalty for both alpha and gamma (penalty[[4]] is the gamma penalty)
-    out <- -(sum(y*log(prob/(1-prob)) + units_m*log(1-prob)) -
-               penalty[[1]](alpha) - penalty[[4]](gamma))
+    out <- -(sum(y*log(prob/(1-prob)) + units_m*log(1-prob)) +
+               penalty[[1]](alpha) + penalty[[4]](gamma))
     return(out)
   }
 
@@ -2043,8 +2043,8 @@ dast_fit <-
     MC.log.lik <- function(par) {
       alpha <- if (is.null(fix_alpha)) exp(par[ind_alpha])/(1+exp(par[ind_alpha])) else fix_alpha
       gamma <- exp(par[ind_gamma])
-      log(mean(exp(compute.log.f(par)-log.f.tilde))) +
-        penalty[[1]](alpha) + penalty[[4]](gamma)
+      log(mean(exp(compute.log.f(par)-log.f.tilde))) -
+        penalty[[1]](alpha) - penalty[[4]](gamma)
     }
 
     grad.MC.log.lik <- function(par) {
@@ -2489,7 +2489,7 @@ dast_fit <-
     if(return_samples) out$S_samples <- S_tot_samples
     class(out) <- "RiskMap"
     return(out)
-  }
+}
 
 
 maxim.integrand.dast <- function(y,units_m,mu,Sigma,ID_coords, ID_re = NULL,

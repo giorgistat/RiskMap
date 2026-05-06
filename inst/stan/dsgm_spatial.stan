@@ -7,9 +7,13 @@
 // values theta_0, which are then passed to the TMB MCML engine (dsgm_tmb.cpp).
 //
 // Model:
-//   W_j(x_i) | S(x_i) ~ NegBin(mu(x_i), k)
+//   W_j(x_i) | S(x_i) ~ NegBin(mu(x_i), omega_i)
 //     log mu(x_i) = eta_fixed[i] + S[ID_coords[i]]
 //     mu(x_i)     = exp(eta_fixed[i] + S[ID_coords[i]]) * mda_impact[i]
+//
+//   Aggregation parameter (controlled by vary_k):
+//     vary_k = 0:  omega_i = exp(log_k)                          [constant]
+//     vary_k = 1:  log(omega_i) = log_k + omega1 * log(mu_W[i]) [varies with burden]
 //
 //   Y_ij | W_j(x_i) ~ Poisson(rho * W_j(x_i))
 //
@@ -22,8 +26,8 @@
 //   R[i,j] = exp(-D_mat[i,j] / phi),  L = cholesky(R)
 //   L is computed once in transformed_data since phi is fixed.
 //
-// All model parameters (k, rho, sigma2, phi) are FIXED at their theta_0
-// values and passed as data. Only S_raw is sampled.
+// All model parameters are FIXED at their theta_0 values and passed as data.
+// Only S_raw is sampled.
 // =============================================================================
 
 data {
@@ -56,10 +60,18 @@ data {
   vector<lower=0>[n] mda_impact;
 
   // Fixed parameters at theta_0
-  real<lower=0> k;       // NB aggregation parameter
+  // log_k  = log of the baseline aggregation parameter (= log(k) when vary_k=0)
+  // omega1 = slope of log(omega) on log(mu_W); set to 0.0 when vary_k=0
+  real log_k;
+  real omega1;
   real<lower=0> rho;     // Per-worm egg detection rate
   real<lower=0> sigma2;  // GP variance
   real<lower=0> phi;     // GP range
+
+  // Aggregation parameterisation flag
+  // 0 = constant omega (original behaviour)
+  // 1 = omega_i = exp(log_k + omega1 * log(mu_W_i))
+  int<lower=0, upper=1> vary_k;
 
   // Intensity likelihood family: 0 = shifted Gamma, 1 = zero-truncated NegBin
   int<lower=0, upper=1> intensity_family;
@@ -93,14 +105,23 @@ transformed parameters {
 
   vector[n_loc] S;
   vector[n]     mu_W;
+  vector[n]     k_vec;   // per-observation aggregation parameter
   vector[n]     pr_pos;
 
   S = sqrt(sigma2) * (L * S_raw);
 
   for (i in 1:n) {
-    mu_W[i]    = exp(eta_fixed[i] + S[ID_coords[i]]) * mda_impact[i];
-    real ratio = k / (k + mu_W[i] * c_rho);
-    pr_pos[i]  = fmax(fmin(1.0 - pow(ratio, k), 1.0 - 1e-10), 1e-10);
+    mu_W[i] = exp(eta_fixed[i] + S[ID_coords[i]]) * mda_impact[i];
+
+    // Compute per-observation omega
+    if (vary_k == 1) {
+      k_vec[i] = exp(log_k + omega1 * log(fmax(mu_W[i], 1e-10)));
+    } else {
+      k_vec[i] = exp(log_k);
+    }
+
+    real ratio = k_vec[i] / (k_vec[i] + mu_W[i] * c_rho);
+    pr_pos[i]  = fmax(fmin(1.0 - pow(ratio, k_vec[i]), 1.0 - 1e-10), 1e-10);
   }
 
 }
@@ -120,21 +141,20 @@ model {
 
   // ----- Intensity likelihood (positives only) -----
   for (idx in 1:n_pos) {
-    int i = pos_idx[idx];
+    int  i   = pos_idx[idx];
+    real k_i = k_vec[i];
 
     // Conditional moments of C | C > 0
     real mu_C     = (rho * mu_W[i]) / pr_pos[i];
     real sigma2_C = fmax(
       (rho * mu_W[i] * (1.0 + rho)) / pr_pos[i]
-      + (rho^2 * mu_W[i]^2 / pr_pos[i]) * (1.0/k + 1.0 - 1.0/pr_pos[i]),
+      + (rho^2 * mu_W[i]^2 / pr_pos[i]) * (1.0/k_i + 1.0 - 1.0/pr_pos[i]),
       1e-6);
 
     if (intensity_family == 0) {
 
       // ------------------------------------------------------------------
       // Shifted Gamma: C - 1 ~ Gamma(kappa_C, rate_C)
-      // mu_C1 floored at 0.1 to prevent shape/rate collapsing to zero
-      // when mu_C -> 1 at low worm burden
       // ------------------------------------------------------------------
       real mu_C1   = fmax(mu_C - 1.0, 0.1);
       real kappa_C = fmax(square(mu_C1) / sigma2_C, 1e-6);
@@ -145,8 +165,6 @@ model {
 
       // ------------------------------------------------------------------
       // Zero-truncated NegBin2: C | C > 0 ~ NegBin2(mu_C, phi_C) / (1 - p0)
-      // phi_C = mu_C^2 / (sigma2_C - mu_C)
-      // p0    = P(C = 0) under untruncated NegBin2
       // ------------------------------------------------------------------
       real denom_nb = fmax(sigma2_C - mu_C, 1e-6);
       real phi_C    = fmax(square(mu_C) / denom_nb, 1e-4);
