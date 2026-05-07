@@ -297,6 +297,7 @@ pred_over_grid <- function(object,
         S_obj <- sample_spatial_process_stan(
           y_prev            = object$prevalence_data,
           intensity_data    = object$intensity_data,
+          vary_k            = object$vary_k,
           D                 = object$D,
           coords            = object$coords,
           ID_coords         = object$ID_coords,

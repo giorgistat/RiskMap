@@ -35,12 +35,7 @@ convert_penalty_to_tmb <- function(penalty) {
     use_rho_penalty    = 0,
     rho_penalty_type   = 3,
     rho_param1         = 0,
-    rho_param2         = 1,
-    # omega1 penalty (active only when vary_k = TRUE)
-    use_omega1_penalty  = 0,
-    omega1_penalty_type = 1,   # 1 = Normal(mean, sd) on omega1
-    omega1_param1       = 0.5, # prior mean for omega1
-    omega1_param2       = 0.5  # prior sd for omega1
+    rho_param2         = 1
   )
 
   if (is.null(penalty)) return(tmb_penalty)
@@ -108,6 +103,7 @@ convert_penalty_to_tmb <- function(penalty) {
     tmb_penalty$gamma_penalty_type <- 3
     tmb_penalty$gamma_param1       <- penalty$gamma_mean
     tmb_penalty$gamma_param2       <- penalty$gamma_sd
+
   } else if (!is.null(penalty$gamma) && is.function(penalty$gamma)) {
     warning("Using function-based gamma penalty. Defaulting to Gamma(2,1).")
     tmb_penalty$use_gamma_penalty  <- 1
@@ -141,21 +137,10 @@ convert_penalty_to_tmb <- function(penalty) {
     tmb_penalty$rho_param2       <- penalty$rho_sd
   }
 
-  # ===========================================================================
-  # OMEGA1 PENALTY  (slope of log(omega) on log(mu_W); only used when vary_k=TRUE)
-  # ===========================================================================
-  # Specified as penalty$omega1_mean and penalty$omega1_sd for a Normal prior
-  # on the slope omega1. If not specified, no penalty is applied on omega1.
-  if (!is.null(penalty$omega1_mean) && !is.null(penalty$omega1_sd)) {
-    tmb_penalty$use_omega1_penalty  <- 1
-    tmb_penalty$omega1_penalty_type <- 1
-    tmb_penalty$omega1_param1       <- penalty$omega1_mean
-    tmb_penalty$omega1_param2       <- penalty$omega1_sd
-  }
+  # omega1 has no penalty and no corresponding TMB data fields.
 
   return(tmb_penalty)
 }
-
 
 ##' @title Fit DSGM using TMB
 ##' @description MCML estimation using TMB for automatic differentiation.
@@ -296,10 +281,6 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
       rho_penalty_type         = tmb_penalty$rho_penalty_type,
       rho_param1               = tmb_penalty$rho_param1,
       rho_param2               = tmb_penalty$rho_param2,
-      use_omega1_penalty       = tmb_penalty$use_omega1_penalty,
-      omega1_penalty_type      = tmb_penalty$omega1_penalty_type,
-      omega1_param1            = tmb_penalty$omega1_param1,
-      omega1_param2            = tmb_penalty$omega1_param2,
       compute_denominator_only = as.integer(compute_denom),
       log_denominator_vals     = log_denom_vals,
       intensity_family         = as.integer(intensity_family),
@@ -398,11 +379,6 @@ dsgm_fit_tmb <- function(y_prev            = NULL,
       d <- log(par0$rho) - tmb_penalty$rho_param1
       expected_penalty <- expected_penalty + 0.5 * d^2 / tmb_penalty$rho_param2^2
     }
-  }
-  # omega1 penalty contribution at theta_0 (omega1_init)
-  if (vary_k && tmb_penalty$use_omega1_penalty == 1) {
-    d <- omega1_init - tmb_penalty$omega1_param1
-    expected_penalty <- expected_penalty + 0.5 * d^2 / tmb_penalty$omega1_param2^2
   }
 
   if (abs(obj_at_par0 - expected_penalty) > 0.1)

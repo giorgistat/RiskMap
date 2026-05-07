@@ -7,9 +7,15 @@
 // prevalence-intensity modelling of soil-transmitted helminths (STH).
 //
 // Hierarchical model:
-//   W_j(x_i) | S(x_i) ~ NegBin(mu(x_i), k)
+//   W_j(x_i) | S(x_i) ~ NegBin(mu(x_i), omega_i)
 //     log mu*(x_i) = D_i * beta + S(x_i)
 //     mu(x_i)      = mu*(x_i) * MDA_effect(x_i, t)
+//
+//   Aggregation parameter (vary_k controls which form is used):
+//     vary_k = 0:  omega_i = exp(log_k)                      [constant, default]
+//     vary_k = 1:  log(omega_i) = log_k + omega1*log(mu_W_i) [varies with burden]
+//
+//   omega1 is a free, unpenalised regression slope — well-identified from data.
 //
 //   Y_ij | W_j(x_i) ~ Poisson(rho * W_j(x_i))
 //
@@ -23,11 +29,6 @@
 // Inference: MCML with importance sampling.
 //   Step 1: compute_denominator_only = 1  -> report log_f_vals at theta_0
 //   Step 2: compute_denominator_only = 0  -> MCML objective
-//
-// Penalty types for gamma_W:
-//   1 = Gamma(shape, rate) on gamma_W          gradient ~ O(gamma_W)
-//   2 = Normal(mean, sd)   on gamma_W          gradient ~ O(gamma_W - mean)
-//   3 = Log-Normal: Normal(mu, sd) on log_gamma gradient ~ O(1)  [preferred]
 // =============================================================================
 
 template<class Type>
@@ -45,65 +46,68 @@ Type objective_function<Type>::operator() ()
   // DATA
   // ===========================================================================
 
-  DATA_VECTOR(y_prev);          // Binary infection status (0/1), length n
-  DATA_VECTOR(intensity_data);  // EPG for egg-positive individuals, length n_pos
-  DATA_IVECTOR(pos_idx);        // 0-indexed positions of positives in y_prev
+  DATA_VECTOR(y_prev);
+  DATA_VECTOR(intensity_data);
+  DATA_IVECTOR(pos_idx);
 
-  DATA_MATRIX(D);               // Covariate matrix, n x p
-  DATA_VECTOR(cov_offset);      // Linear predictor offset, length n
+  DATA_MATRIX(D);
+  DATA_VECTOR(cov_offset);
 
-  DATA_MATRIX(S_samples);       // Stan MCMC samples of S, n_samples x n_loc
-  DATA_IVECTOR(ID_coords);      // 0-indexed location ID per obs, length n
+  DATA_MATRIX(S_samples);
+  DATA_IVECTOR(ID_coords);
 
-  DATA_VECTOR(dist_vec);        // Compressed upper-triangle distance vector
-  DATA_INTEGER(n_loc);          // Number of unique spatial locations
+  DATA_VECTOR(dist_vec);
+  DATA_INTEGER(n_loc);
 
   // MDA block
-  DATA_VECTOR(survey_times);    // Survey time per obs, length n
-  DATA_VECTOR(mda_times);       // MDA round times, length n_mda
-  DATA_IVECTOR(mda_i);          // Row indices (0-indexed) of non-zero int_mat entries
-  DATA_IVECTOR(mda_j);          // Col indices (0-indexed) of non-zero int_mat entries
-  DATA_VECTOR(mda_coverage);    // Coverage values for non-zero entries
-  DATA_INTEGER(n_mda_pairs);    // Number of non-zero entries
+  DATA_VECTOR(survey_times);
+  DATA_VECTOR(mda_times);
+  DATA_IVECTOR(mda_i);
+  DATA_IVECTOR(mda_j);
+  DATA_VECTOR(mda_coverage);
+  DATA_INTEGER(n_mda_pairs);
 
   // Alpha penalty
   DATA_INTEGER(use_alpha_penalty);
-  DATA_INTEGER(alpha_penalty_type);  // 1 = Beta(a,b) on alpha_W; 2 = Normal on logit
+  DATA_INTEGER(alpha_penalty_type);  // 1 = Beta(a,b); 2 = Normal on logit
   DATA_SCALAR(alpha_param1);
   DATA_SCALAR(alpha_param2);
 
   // Gamma_W penalty
   DATA_INTEGER(use_gamma_penalty);
-  DATA_INTEGER(gamma_penalty_type);  // 1 = Gamma(shape,rate); 2 = Normal; 3 = Log-Normal
+  DATA_INTEGER(gamma_penalty_type);  // 1 = Gamma; 2 = Normal; 3 = Log-Normal [preferred]
   DATA_SCALAR(gamma_param1);
   DATA_SCALAR(gamma_param2);
 
   // Rho penalty
   DATA_INTEGER(use_rho_penalty);
-  DATA_INTEGER(rho_penalty_type);  // 1 = Gamma(shape,rate); 2 = Normal; 3 = Log-Normal on log_rho
+  DATA_INTEGER(rho_penalty_type);    // 1 = Gamma; 2 = Normal; 3 = Log-Normal [preferred]
   DATA_SCALAR(rho_param1);
   DATA_SCALAR(rho_param2);
 
   // Importance sampling
   DATA_INTEGER(compute_denominator_only);
-  DATA_VECTOR(log_denominator_vals);  // length n_samples
+  DATA_VECTOR(log_denominator_vals);
 
   // Intensity likelihood family: 0 = shifted Gamma, 1 = zero-truncated NegBin
   DATA_INTEGER(intensity_family);
+
+  // Aggregation flag: 0 = constant omega, 1 = omega varies with mu_W
+  DATA_INTEGER(vary_k);
 
   // ===========================================================================
   // PARAMETERS
   // ===========================================================================
 
-  PARAMETER_VECTOR(beta);       // Fixed-effect coefficients
-  PARAMETER(log_k);             // log NB aggregation parameter
-  PARAMETER(log_rho);           // log per-worm egg detection rate
-  PARAMETER(logit_alpha);       // logit immediate worm burden reduction in (0,1)
-  PARAMETER(log_gamma);         // log worm burden recovery rate  <- raw TMB parameter
-  PARAMETER(log_sigma2);        // log GP variance
-  PARAMETER(log_phi);           // log GP range
+  PARAMETER_VECTOR(beta);
+  PARAMETER(log_k);       // log baseline aggregation (omega_0)
+  PARAMETER(log_rho);
+  PARAMETER(logit_alpha);
+  PARAMETER(log_gamma);
+  PARAMETER(log_sigma2);
+  PARAMETER(log_phi);
+  PARAMETER(omega1);      // slope of log(omega) on log(mu_W); fixed at 0 when vary_k=0
 
-  // Natural-scale transforms
   const Type k       = exp(log_k);
   const Type rho     = exp(log_rho);
   const Type alpha_W = Type(1.0) / (Type(1.0) + exp(-logit_alpha));
@@ -132,7 +136,7 @@ Type objective_function<Type>::operator() ()
   }
 
   // ===========================================================================
-  // CORRELATION MATRIX AND CHOLESKY (outside MC loop)
+  // CORRELATION MATRIX AND CHOLESKY
   // ===========================================================================
 
   matrix<Type> R(n_loc, n_loc);
@@ -153,7 +157,7 @@ Type objective_function<Type>::operator() ()
   log_det_R *= Type(2.0);
 
   // ===========================================================================
-  // FIXED-EFFECTS LINEAR PREDICTOR (outside MC loop)
+  // FIXED-EFFECTS LINEAR PREDICTOR
   // ===========================================================================
 
   vector<Type> mu_fixed = D * beta + cov_offset;
@@ -169,7 +173,6 @@ Type objective_function<Type>::operator() ()
 
     vector<Type> S_s = S_samples.row(s);
 
-    // Mean worm burden with MDA
     vector<Type> mu_W(n);
     for (int i = 0; i < n; i++)
       mu_W(i) = exp(mu_fixed(i) + S_s(ID_coords(i))) * mda_effect(i);
@@ -178,10 +181,13 @@ Type objective_function<Type>::operator() ()
     Type ll = Type(0.0);
 
     for (int i = 0; i < n; i++) {
-      Type ratio = k / (k + mu_W(i) * c_rho);
-      Type pr    = Type(1.0) - pow(ratio, k);
-      pr = CppAD::CondExpLt(pr, Type(1e-10),               Type(1e-10),               pr);
-      pr = CppAD::CondExpGt(pr, Type(1.0) - Type(1e-10),   Type(1.0) - Type(1e-10),   pr);
+      Type k_i = (vary_k == 1) ?
+      exp(log_k + omega1 * log(mu_W(i) + Type(1e-10))) : k;
+
+      Type ratio = k_i / (k_i + mu_W(i) * c_rho);
+      Type pr    = Type(1.0) - pow(ratio, k_i);
+      pr = CppAD::CondExpLt(pr, Type(1e-10),             Type(1e-10),             pr);
+      pr = CppAD::CondExpGt(pr, Type(1.0) - Type(1e-10), Type(1.0) - Type(1e-10), pr);
 
       if (y_prev(i) > Type(0.5))
         ll += log(pr);
@@ -191,26 +197,24 @@ Type objective_function<Type>::operator() ()
 
     // ----- Intensity likelihood (positives only) -----
     for (int idx = 0; idx < n_pos; idx++) {
-      int  i     = pos_idx(idx);
-      Type mu_i  = mu_W(i);
-      Type ratio = k / (k + mu_i * c_rho);
-      Type pr_i  = Type(1.0) - pow(ratio, k);
+      int  i    = pos_idx(idx);
+      Type mu_i = mu_W(i);
+      Type k_i  = (vary_k == 1) ?
+      exp(log_k + omega1 * log(mu_i + Type(1e-10))) : k;
+
+      Type ratio = k_i / (k_i + mu_i * c_rho);
+      Type pr_i  = Type(1.0) - pow(ratio, k_i);
       pr_i = CppAD::CondExpLt(pr_i, Type(1e-10), Type(1e-10), pr_i);
 
-      // Conditional moments of C | C > 0
       Type mu_C     = (rho * mu_i) / pr_i;
       Type sigma2_C = (rho * mu_i * (Type(1.0) + rho)) / pr_i
       + (rho * rho * mu_i * mu_i / pr_i)
-        * (Type(1.0)/k + Type(1.0) - Type(1.0)/pr_i);
+        * (Type(1.0)/k_i + Type(1.0) - Type(1.0)/pr_i);
         sigma2_C = CppAD::CondExpLt(sigma2_C, Type(1e-6), Type(1e-6), sigma2_C);
 
         if (intensity_family == 0) {
 
-          // ------------------------------------------------------------------
           // Shifted Gamma: C - 1 ~ Gamma(kappa_C, theta_C)
-          // mu_C1 floored at 0.1 to prevent shape/rate collapsing to zero
-          // when mu_C -> 1 at low worm burden
-          // ------------------------------------------------------------------
           Type mu_C1 = mu_C - Type(1.0);
           mu_C1 = CppAD::CondExpLt(mu_C1, Type(0.1), Type(0.1), mu_C1);
 
@@ -229,31 +233,20 @@ Type objective_function<Type>::operator() ()
 
         } else {
 
-          // ------------------------------------------------------------------
-          // Zero-truncated NegBin2: C | C > 0 ~ NegBin2(mu_C, phi_C) / (1 - p0)
-          // phi_C = mu_C^2 / (sigma2_C - mu_C)
-          // p0    = P(C = 0) under the untruncated NegBin2
-          // log NegBin2(c | mu, phi) = lgamma(c+phi) - lgamma(phi) - lgamma(c+1)
-          //                          + phi*log(phi/(phi+mu)) + c*log(mu/(phi+mu))
-          // ------------------------------------------------------------------
+          // Zero-truncated NegBin2
           Type denom_nb = sigma2_C - mu_C;
           denom_nb = CppAD::CondExpLt(denom_nb, Type(1e-6), Type(1e-6), denom_nb);
           Type phi_C = mu_C * mu_C / denom_nb;
           phi_C = CppAD::CondExpLt(phi_C, Type(1e-4), Type(1e-4), phi_C);
 
-          Type c        = intensity_data(idx);
-          Type log_r    = log(phi_C) - log(phi_C + mu_C);  // log(phi/(phi+mu))
-          Type log_1mr  = log(mu_C)  - log(phi_C + mu_C);  // log(mu/(phi+mu))
+          Type c       = intensity_data(idx);
+          Type log_r   = log(phi_C) - log(phi_C + mu_C);
+          Type log_1mr = log(mu_C)  - log(phi_C + mu_C);
 
-          // log NegBin2(c | mu_C, phi_C)
           Type log_nb = lgamma(c + phi_C) - lgamma(phi_C) - lgamma(c + Type(1.0))
-            + phi_C * log_r
-          + c     * log_1mr;
+            + phi_C * log_r + c * log_1mr;
 
-          // log p0 = NegBin2(0 | mu_C, phi_C) = phi_C * log(phi_C/(phi_C+mu_C))
           Type log_p0   = phi_C * log_r;
-
-          // log(1 - p0): use log1m_exp for numerical stability when p0 is close to 1
           Type log1m_p0 = log(Type(1.0) - exp(log_p0));
           log1m_p0 = CppAD::CondExpLt(log1m_p0, Type(-30.0), Type(-30.0), log1m_p0);
 
@@ -276,10 +269,6 @@ Type objective_function<Type>::operator() ()
     log_num : log_num - log_denominator_vals(s);
   }
 
-  // ===========================================================================
-  // DENOMINATOR PASS
-  // ===========================================================================
-
   if (compute_denominator_only) {
     REPORT(log_f_vals);
     return Type(0);
@@ -294,54 +283,42 @@ Type objective_function<Type>::operator() ()
   Type mc_loglik  = log(ef.mean()) + max_lf;
 
   // ===========================================================================
-  // PENALTIES
+  // PENALTIES  (alpha_W, gamma_W, rho only — omega1 is free)
   // ===========================================================================
 
   Type penalty = Type(0.0);
 
-  // --- Alpha_W ---
   if (use_alpha_penalty == 1) {
     if (alpha_penalty_type == 1) {
-      // Beta(a, b) on alpha_W
       penalty -= (alpha_param1 - Type(1.0)) * log(alpha_W);
       penalty -= (alpha_param2 - Type(1.0)) * log(Type(1.0) - alpha_W);
     } else if (alpha_penalty_type == 2) {
-      // Normal(mean, sd) on logit(alpha_W)
       Type d = logit_alpha - alpha_param1;
       penalty += Type(0.5) * d * d / (alpha_param2 * alpha_param2);
     }
   }
 
-  // --- Gamma_W ---
   if (use_gamma_penalty == 1) {
     if (gamma_penalty_type == 1) {
-      // Gamma(shape, rate) on gamma_W — gradient O(gamma_W), can cause IS collapse
       penalty -= (gamma_param1 - Type(1.0)) * log(gamma_W);
       penalty += gamma_param2 * gamma_W;
     } else if (gamma_penalty_type == 2) {
-      // Normal(mean, sd) on gamma_W directly
       Type d = gamma_W - gamma_param1;
       penalty += Type(0.5) * d * d / (gamma_param2 * gamma_param2);
     } else if (gamma_penalty_type == 3) {
-      // Log-Normal: Normal(mu, sd) on log(gamma_W)
-      // log_gamma is the raw TMB parameter so gradient is O(1) — preferred
       Type d = log_gamma - gamma_param1;
       penalty += Type(0.5) * d * d / (gamma_param2 * gamma_param2);
     }
   }
 
-  // --- Rho ---
   if (use_rho_penalty == 1) {
     if (rho_penalty_type == 1) {
-      // Gamma(shape, rate) on rho
       penalty -= (rho_param1 - Type(1.0)) * log(rho);
       penalty += rho_param2 * rho;
     } else if (rho_penalty_type == 2) {
-      // Normal(mean, sd) on rho
       Type d = rho - rho_param1;
       penalty += Type(0.5) * d * d / (rho_param2 * rho_param2);
     } else if (rho_penalty_type == 3) {
-      // Log-Normal: Normal(mu, sd) on log_rho — preferred, gradient O(1)
       Type d = log_rho - rho_param1;
       penalty += Type(0.5) * d * d / (rho_param2 * rho_param2);
     }
@@ -349,16 +326,13 @@ Type objective_function<Type>::operator() ()
 
   Type nll = -(mc_loglik - penalty);
 
-  // ===========================================================================
-  // REPORT ON NATURAL SCALE
-  // ===========================================================================
-
   ADREPORT(k);
   ADREPORT(rho);
   ADREPORT(alpha_W);
   ADREPORT(gamma_W);
   ADREPORT(sigma2);
   ADREPORT(phi);
+  ADREPORT(omega1);
 
   return nll;
 }

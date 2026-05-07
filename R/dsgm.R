@@ -1,10 +1,337 @@
+detect_stan_backend <- function(messages = TRUE) {
+  if (requireNamespace("cmdstanr", quietly = TRUE)) {
+    ok <- tryCatch({ cmdstanr::cmdstan_version(); TRUE }, error = function(e) FALSE)
+    if (ok) {
+      if (messages) message("Using cmdstanr backend")
+      return("cmdstanr")
+    }
+  }
+  if (requireNamespace("rstan", quietly = TRUE)) {
+    if (messages) message("Using rstan backend (cmdstanr unavailable)")
+    return("rstan")
+  }
+  stop("Neither rstan nor cmdstanr is available. Install cmdstanr for persistent caching across sessions.")
+}
+
+
+##' @title Compile and cache a Stan model
+##' @keywords internal
+get_stan_model <- function(model = c("sth", "lf"), backend = NULL,
+                           messages = TRUE) {
+  model <- match.arg(model)
+
+  cache_model   <- paste0("stan_model_",   model)
+  cache_backend <- paste0("stan_backend_", model)
+
+  if (is.null(backend)) {
+    if (!is.null(.dsgm_cache[[cache_backend]])) {
+      backend <- .dsgm_cache[[cache_backend]]
+    } else {
+      backend <- detect_stan_backend(messages = messages)
+    }
+  }
+
+  if (!is.null(.dsgm_cache[[cache_model]]) &&
+      identical(.dsgm_cache[[cache_backend]], backend)) {
+    if (messages) message("Using cached Stan model (", model, ")")
+    return(list(model = .dsgm_cache[[cache_model]], backend = backend))
+  }
+
+  stan_file <- switch(model,
+                      sth = system.file("stan/dsgm_spatial.stan", package = "RiskMap"),
+                      lf  = system.file("stan/dsgm_mdiag.stan",   package = "RiskMap")
+  )
+  if (!file.exists(stan_file))
+    stop("Stan model file not found: ", basename(stan_file))
+
+  cache_dir <- tools::R_user_dir("RiskMap", "cache")
+  if (!dir.exists(cache_dir)) dir.create(cache_dir, recursive = TRUE)
+
+  if (backend == "rstan") {
+    cached_stan <- file.path(cache_dir, basename(stan_file))
+    if (!file.exists(cached_stan) ||
+        file.mtime(stan_file) > file.mtime(cached_stan)) {
+      file.copy(stan_file, cached_stan, overwrite = TRUE)
+    }
+    rds_path <- sub("\\.stan$", ".rds", cached_stan)
+    if (file.exists(rds_path)) {
+      if (messages) message("Loading pre-compiled rstan model (", model, ")")
+      compiled <- rstan::stan_model(file = cached_stan,
+                                    model_name = paste0("dsgm_", model),
+                                    verbose = FALSE, auto_write = TRUE)
+    } else {
+      if (messages) message("Compiling Stan model '", basename(stan_file), "'...")
+      compiled <- rstan::stan_model(file = cached_stan,
+                                    model_name = paste0("dsgm_", model),
+                                    verbose = FALSE, auto_write = TRUE)
+      if (messages) message("  Saved to: ", rds_path)
+    }
+  } else {
+    exe_path <- file.path(cache_dir,
+                          paste0("dsgm_", model,
+                                 if (.Platform$OS.type == "windows") ".exe" else ""))
+    exe_is_fresh <- file.exists(exe_path) &&
+      file.mtime(exe_path) >= file.mtime(stan_file)
+    if (exe_is_fresh) {
+      if (messages) message("Loading pre-compiled cmdstanr model (", model, ")")
+      compiled <- cmdstanr::cmdstan_model(stan_file = stan_file,
+                                          exe_file  = exe_path,
+                                          compile   = FALSE)
+    } else {
+      if (messages) message("Compiling Stan model '", basename(stan_file), "'...")
+      compiled <- cmdstanr::cmdstan_model(stan_file = stan_file,
+                                          exe_file  = exe_path,
+                                          compile   = TRUE)
+      if (messages) message("  Saved to: ", exe_path)
+    }
+  }
+
+  .dsgm_cache[[cache_model]]   <- compiled
+  .dsgm_cache[[cache_backend]] <- backend
+  if (messages) message("Stan model ready (", model, ")")
+  return(list(model = compiled, backend = backend))
+}
+
+
 # =============================================================================
-# CHANGES TO dsgm.R — only the functions/sections that differ from the
-# original are shown here. Everything else (detect_stan_backend, get_stan_model,
-# .run_stan, .extract_S, sample_spatial_process_stan*,
-# thin_spatial_samples, compute_spatial_ess, print.dsgm_spatial_samples,
-# dsgm_initial_value_lf, .dsgm_fit_tmb_lf_mdiag) is UNCHANGED.
+# Internal Stan dispatch helpers
 # =============================================================================
+
+.run_stan <- function(stan_model, backend, stan_data,
+                      n_samples, n_warmup, n_chains, n_cores,
+                      adapt_delta, max_treedepth, messages) {
+  if (backend == "rstan") {
+    rstan::sampling(
+      stan_model,
+      data    = stan_data,
+      iter    = n_samples + n_warmup,
+      warmup  = n_warmup,
+      chains  = n_chains,
+      cores   = n_cores,
+      control = list(adapt_delta = adapt_delta,
+                     max_treedepth = max_treedepth),
+      refresh = ifelse(messages, max(1, (n_samples + n_warmup) %/% 10), 0),
+      show_messages = messages,
+      verbose       = messages
+    )
+  } else {
+    stan_model$sample(
+      data            = stan_data,
+      iter_warmup     = n_warmup,
+      iter_sampling   = n_samples,
+      chains          = n_chains,
+      parallel_chains = n_cores,
+      adapt_delta     = adapt_delta,
+      max_treedepth   = max_treedepth,
+      refresh = ifelse(messages, max(1, (n_samples + n_warmup) %/% 10), 0),
+      show_messages   = messages,
+      show_exceptions = messages
+    )
+  }
+}
+
+.extract_S <- function(fit, backend, messages) {
+  if (backend == "rstan") {
+    S <- rstan::extract(fit, pars = "S")$S
+    if (messages) {
+      n_div <- sum(rstan::get_num_divergent(fit))
+      n_mtr <- sum(rstan::get_num_max_treedepth(fit))
+      message(sprintf("Extracted %d samples (%d locations) | divergent: %d | max-treedepth: %d",
+                      nrow(S), ncol(S), n_div, n_mtr))
+      if (n_div > 0) warning("Divergent transitions detected. Consider increasing adapt_delta.")
+    }
+  } else {
+    S <- fit$draws("S", format = "matrix")
+    if (messages) {
+      diag  <- fit$diagnostic_summary()
+      n_div <- sum(diag$num_divergent)
+      n_mtr <- sum(diag$num_max_treedepth)
+      message(sprintf("Extracted %d samples (%d locations) | divergent: %d | max-treedepth: %d",
+                      nrow(S), ncol(S), n_div, n_mtr))
+      if (n_div > 0) warning("Divergent transitions detected. Consider increasing adapt_delta.")
+    }
+  }
+  S
+}
+
+
+# =============================================================================
+# Stan samplers
+# =============================================================================
+
+##' @title Sample spatial process for the STH model
+##' @param intensity_family Integer; 0 = shifted Gamma (default), 1 = zero-truncated NegBin.
+##' @keywords internal
+sample_spatial_process_stan <- function(y_prev,
+                                        intensity_data,
+                                        D,
+                                        coords,
+                                        ID_coords,
+                                        int_mat,
+                                        survey_times_data,
+                                        mda_times,
+                                        par,
+                                        n_samples        = 1000,
+                                        n_warmup         = 1000,
+                                        n_chains         = 4,
+                                        n_cores          = 4,
+                                        adapt_delta      = 0.8,
+                                        max_treedepth    = 10,
+                                        intensity_family = 0L,
+                                        backend          = NULL,
+                                        messages         = TRUE) {
+
+  n       <- length(y_prev)
+  n_loc   <- nrow(coords)
+  p       <- ncol(D)
+  pos_idx <- which(y_prev == 1)
+  n_pos   <- length(pos_idx)
+
+  mda_impact <- compute_mda_effect(survey_times_data, mda_times, int_mat,
+                                   par$alpha_W, par$gamma_W, kappa = 1)
+
+  stan_data <- list(
+    n                = n,
+    n_loc            = n_loc,
+    n_pos            = n_pos,
+    p                = p,
+    y                = y_prev,
+    C_pos            = intensity_data,
+    C_pos_int        = as.integer(intensity_data),
+    pos_idx          = pos_idx,
+    ID_coords        = ID_coords,
+    D_mat            = as.matrix(dist(coords)),
+    eta_fixed        = as.numeric(D %*% par$beta),
+    mda_impact       = mda_impact,
+    k                = par$k,
+    rho              = par$rho,
+    sigma2           = par$sigma2,
+    phi              = par$phi,
+    intensity_family = as.integer(intensity_family)
+  )
+
+  mod     <- get_stan_model(model = "sth", backend = backend, messages = messages)
+  backend <- mod$backend
+
+  if (messages)
+    message(sprintf("Sampling %d iter (%d warmup), %d chain(s) [sth, family=%s]...",
+                    n_samples + n_warmup, n_warmup, n_chains,
+                    ifelse(intensity_family == 0L, "shifted Gamma", "zero-trunc NegBin")))
+
+  fit       <- .run_stan(mod$model, backend, stan_data,
+                         n_samples, n_warmup, n_chains, n_cores,
+                         adapt_delta, max_treedepth, messages)
+  S_samples <- .extract_S(fit, backend, messages)
+
+  result <- list(S_samples = S_samples, stan_fit = fit,
+                 n_samples = nrow(S_samples), n_loc = n_loc,
+                 coords = coords, par = par, backend = backend)
+  class(result) <- "dsgm_spatial_samples"
+  result
+}
+
+
+##' @title Sample spatial process for the LF multi-diagnostic model
+##' @keywords internal
+sample_spatial_process_stan_lf <- function(y_counts,
+                                           units_m,
+                                           which_diag,
+                                           D,
+                                           coords,
+                                           ID_coords,
+                                           par,
+                                           mda_impact    = NULL,
+                                           n_samples     = 1000,
+                                           n_warmup      = 1000,
+                                           n_chains      = 4,
+                                           n_cores       = 4,
+                                           adapt_delta   = 0.8,
+                                           max_treedepth = 10,
+                                           backend       = NULL,
+                                           messages      = TRUE) {
+
+  n     <- length(y_counts)
+  n_loc <- nrow(coords)
+  p     <- ncol(D)
+
+  if (is.null(mda_impact)) mda_impact <- rep(1.0, n)
+  use_mda_flag <- as.integer(!all(mda_impact == 1.0))
+
+  stan_data <- list(
+    n          = n,
+    n_loc      = n_loc,
+    p          = p,
+    y          = as.integer(y_counts),
+    units_m    = as.integer(units_m),
+    is_mf      = as.integer(which_diag),
+    ID_coords  = as.integer(ID_coords),
+    D_mat      = as.matrix(dist(coords)),
+    eta_fixed  = as.numeric(D %*% par$beta),
+    mda_impact = as.numeric(mda_impact),
+    use_mda    = use_mda_flag,
+    omega      = par$k,
+    alpha      = par$rho,
+    gamma_sens = par$gamma_sens,
+    sigma2     = par$sigma2,
+    phi        = par$phi
+  )
+
+  mod     <- get_stan_model(model = "lf", backend = backend, messages = messages)
+  backend <- mod$backend
+
+  if (messages)
+    message(sprintf("Sampling %d iter (%d warmup), %d chain(s) [lf_mdiag]...",
+                    n_samples + n_warmup, n_warmup, n_chains))
+
+  fit       <- .run_stan(mod$model, backend, stan_data,
+                         n_samples, n_warmup, n_chains, n_cores,
+                         adapt_delta, max_treedepth, messages)
+  S_samples <- .extract_S(fit, backend, messages)
+
+  result <- list(S_samples = S_samples, stan_fit = fit,
+                 n_samples = nrow(S_samples), n_loc = n_loc,
+                 coords = coords, par = par, backend = backend)
+  class(result) <- "dsgm_spatial_samples"
+  result
+}
+
+
+# =============================================================================
+# Utility functions for spatial samples
+# =============================================================================
+
+##' @title Thin spatial process samples
+##' @keywords internal
+thin_spatial_samples <- function(spatial_samples, thin = 10) {
+  keep <- seq(1, nrow(spatial_samples$S_samples), by = thin)
+  spatial_samples$S_samples <- spatial_samples$S_samples[keep, , drop = FALSE]
+  spatial_samples$n_samples  <- nrow(spatial_samples$S_samples)
+  spatial_samples
+}
+
+##' @title Effective sample size for spatial process
+##' @keywords internal
+compute_spatial_ess <- function(spatial_samples) {
+  if (!requireNamespace("coda", quietly = TRUE))
+    stop("Package 'coda' is required for ESS calculation")
+  sapply(seq_len(spatial_samples$n_loc), function(i)
+    coda::effectiveSize(coda::as.mcmc(spatial_samples$S_samples[, i])))
+}
+
+##' @title Print method for dsgm_spatial_samples
+##' @keywords internal
+print.dsgm_spatial_samples <- function(x, ...) {
+  cat("DSGM Spatial Process Samples\n")
+  cat(sprintf("  Samples   : %d\n", x$n_samples))
+  cat(sprintf("  Locations : %d\n", x$n_loc))
+  cat(sprintf("  Matrix    : %d x %d\n", nrow(x$S_samples), ncol(x$S_samples)))
+  if (requireNamespace("coda", quietly = TRUE)) {
+    ess <- compute_spatial_ess(x)
+    cat(sprintf("  ESS       : %.0f - %.0f  (median %.0f)\n",
+                min(ess), max(ess), median(ess)))
+  }
+  invisible(x)
+}
 
 
 # =============================================================================
@@ -25,7 +352,7 @@ dsgm_initial_value <- function(y_prev, intensity_data, D, coords, ID_coords,
   n <- length(y_prev)
   p <- ncol(D)
 
-  .pen <- function(alpha_W, gamma_W, rho, omega1 = 0) {
+  .pen <- function(alpha_W, gamma_W, rho) {
     pen <- 0
     if (!is.null(penalty)) {
       if (is.null(fix_alpha_W)) {
@@ -67,13 +394,10 @@ dsgm_initial_value <- function(y_prev, intensity_data, D, coords, ID_coords,
         pen <- pen + 0.5 * d^2 / penalty$rho_sd^2
       }
     }
-    # omega1 penalty in initial value optimisation
-    if (vary_k && !is.null(penalty$omega1_mean) && !is.null(penalty$omega1_sd)) {
-      d <- omega1 - penalty$omega1_mean
-      pen <- pen + 0.5 * d^2 / penalty$omega1_sd^2
-    }
+
     pen
   }
+
 
   nll <- function(par) {
     beta    <- par[1:p]
@@ -114,7 +438,7 @@ dsgm_initial_value <- function(y_prev, intensity_data, D, coords, ID_coords,
     li[!is.finite(li)] <- -1e10
     ll <- ll + sum(li)
 
-    nll <- -(ll - .pen(alpha_W, gamma_W, rho, if (vary_k) omega1 else 0))
+    nll <- -(ll - .pen(alpha_W, gamma_W, rho))
     if (!is.finite(nll) || nll > 1e10) 1e10 else nll
   }
 
@@ -169,11 +493,6 @@ dsgm_initial_value <- function(y_prev, intensity_data, D, coords, ID_coords,
   if (vary_k) out$omega1 <- o1_e
   out
 }
-
-
-# =============================================================================
-# dsgm  —  main user-facing function (STH branch modified; LF branch unchanged)
-# =============================================================================
 
 ##' @title Fit a Doubly Stochastic Geostatistical Model (DSGM)
 ##'
@@ -343,7 +662,10 @@ dsgm <- function(formula,
     }
 
     if (is.null(par0)) {
-      if (messages) message("\n=== Computing initial parameter values (STH) ===")
+      if (messages) {
+        message("\n=== Computing initial parameter values (STH) ===")
+      }
+
       par0 <- dsgm_initial_value(
         y_prev            = y_prev,
         intensity_data    = intensity_data,
@@ -388,6 +710,7 @@ dsgm <- function(formula,
       survey_times_data = survey_times_data,
       mda_times         = mda_times,
       par               = par0,
+      vary_k            = vary_k,
       n_samples         = n_samples,
       n_warmup          = n_warmup,
       n_chains          = n_chains,
@@ -399,6 +722,11 @@ dsgm <- function(formula,
       messages          = messages)
 
     if (messages) message("\n=== Fitting via TMB-MCML (STH) ===")
+    if(vary_k) {
+      message("\n * Varying aggregation parameter as a function of worm burden")
+    } else {
+      message("\n * Constant aggregation parameter")
+    }
     fit <- dsgm_fit_tmb(
       model             = "sth",
       y_prev            = y_prev,
@@ -426,7 +754,7 @@ dsgm <- function(formula,
     res <- list(
       family            = "intprev",
       intensity_family  = intensity_family,
-      vary_k            = vary_k,             # <-- store in result
+      vary_k            = vary_k,
       prevalence_data   = y_prev,
       intensity_data    = intensity_data,
       egg_counts        = egg_counts,

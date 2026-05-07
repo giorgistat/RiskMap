@@ -424,7 +424,12 @@ coef.RiskMap <- function(object, ...) {
 
     res        <- list()
     res$beta   <- beta_est
-    res$k      <- as.numeric(params$k)
+    if(object$vary_k) {
+      res$k      <- as.numeric(params$k)
+      res$omega1 <- as.numeric(params$omega1)
+    } else {
+      res$k      <- as.numeric(params$k)
+    }
     res$rho    <- as.numeric(params$rho)
 
     # LF-specific: gamma_sens (fixed by user, stored on object) and tau2
@@ -602,6 +607,7 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
       params_se <- list(
         beta   = as.numeric(fix_s[b_idx, "Std. Error"]),
         k      = as.numeric(rep_s["k",      "Std. Error"]),
+        omega1 = if(object$vary_k) as.numeric(rep_s["omega1","Std. Error"]) else NULL,
         rho    = as.numeric(rep_s["rho",    "Std. Error"]),
         sigma2 = as.numeric(rep_s["sigma2", "Std. Error"]),
         phi    = as.numeric(rep_s["phi",    "Std. Error"])
@@ -657,9 +663,17 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
     res$sp <- sp_rows
 
     # ---- 3. NB worm burden parameters (k and rho) ---------------------------
-    res$overdispersion <- rbind(
-      "Aggregation param. (k)" = lnCI(params$k, params_se$k)
-    )
+    res$vary_k <- object$vary_k
+    if(!object$vary_k) {
+      res$overdispersion <- rbind(
+        "Aggregation param. (k)" = lnCI(params$k, params_se$k)
+      )
+    } else {
+      res$overdispersion <- rbind(
+        "Aggregation param. (Intercept)" = lnCI(params$k, params_se$k),
+        "Worm burden reg. coefficient" = lnCI(params$omega1, params_se$omega1)
+      )
+    }
 
     rho_label <- if (object$family == "lf_mdiag")
       "Detection rate per worm (rho)"
