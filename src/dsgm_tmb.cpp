@@ -21,7 +21,7 @@
 //
 // Intensity likelihood for C | C > 0 (controlled by intensity_family):
 //   0 = Shifted Gamma:           C - 1 ~ Gamma(kappa_C, theta_C)
-//   1 = Zero-truncated NegBin2:  C | C > 0 ~ NegBin2(mu_C, phi_C) / (1 - p0)
+//   1 = Shifted NegBin2:         C - 1 ~ NB2(mu_C - 1, phi_C)
 //
 // MDA effect (exponential decay):
 //   MDA_effect(i) = prod_{m: t_i > u_m} [1 - alpha_W * cov_m * exp(-(t_i-u_m)/gamma_W)]
@@ -89,7 +89,7 @@ Type objective_function<Type>::operator() ()
   DATA_INTEGER(compute_denominator_only);
   DATA_VECTOR(log_denominator_vals);
 
-  // Intensity likelihood family: 0 = shifted Gamma, 1 = zero-truncated NegBin
+  // Intensity likelihood family: 0 = shifted Gamma, 1 = shifted NegBin2
   DATA_INTEGER(intensity_family);
 
   // Aggregation flag: 0 = constant omega, 1 = omega varies with mu_W
@@ -233,24 +233,22 @@ Type objective_function<Type>::operator() ()
 
         } else {
 
-          // Zero-truncated NegBin2
-          Type denom_nb = sigma2_C - mu_C;
+          // Shifted NegBin2: C - 1 ~ NB2(mu_C1, phi_C)
+          // Moments of C - 1: mean = mu_C - 1, variance = sigma2_C
+          Type mu_C1 = mu_C - Type(1.0);
+          mu_C1 = CppAD::CondExpLt(mu_C1, Type(0.1), Type(0.1), mu_C1);
+
+          Type denom_nb = sigma2_C - mu_C1;
           denom_nb = CppAD::CondExpLt(denom_nb, Type(1e-6), Type(1e-6), denom_nb);
-          Type phi_C = mu_C * mu_C / denom_nb;
+          Type phi_C = mu_C1 * mu_C1 / denom_nb;
           phi_C = CppAD::CondExpLt(phi_C, Type(1e-4), Type(1e-4), phi_C);
 
-          Type c       = intensity_data(idx);
-          Type log_r   = log(phi_C) - log(phi_C + mu_C);
-          Type log_1mr = log(mu_C)  - log(phi_C + mu_C);
+          Type c_shift = intensity_data(idx) - Type(1.0);   // C - 1 >= 0
+          Type log_r   = log(phi_C)  - log(phi_C + mu_C1);
+          Type log_1mr = log(mu_C1)  - log(phi_C + mu_C1);
 
-          Type log_nb = lgamma(c + phi_C) - lgamma(phi_C) - lgamma(c + Type(1.0))
-            + phi_C * log_r + c * log_1mr;
-
-          Type log_p0   = phi_C * log_r;
-          Type log1m_p0 = log(Type(1.0) - exp(log_p0));
-          log1m_p0 = CppAD::CondExpLt(log1m_p0, Type(-30.0), Type(-30.0), log1m_p0);
-
-          ll += log_nb - log1m_p0;
+          ll += lgamma(c_shift + phi_C) - lgamma(phi_C) - lgamma(c_shift + Type(1.0))
+            + phi_C * log_r + c_shift * log_1mr;
         }
     }
 

@@ -19,7 +19,7 @@
 //
 // Intensity likelihood for C | C > 0 (controlled by intensity_family):
 //   0 = Shifted Gamma:           C - 1 ~ Gamma(kappa_C, rate_C)
-//   1 = Zero-truncated NegBin:   C | C > 0 ~ NegBin2(mu_C, phi_C) / (1 - p0)
+//   1 = Shifted NegBin2:         C - 1 ~ NB2(mu_C - 1, phi_C)
 //
 // Spatial process:
 //   S = sqrt(sigma2) * L * S_raw,   S_raw ~ N(0, I)
@@ -73,7 +73,7 @@ data {
   // 1 = omega_i = exp(log_k + omega1 * log(mu_W_i))
   int<lower=0, upper=1> vary_k;
 
-  // Intensity likelihood family: 0 = shifted Gamma, 1 = zero-truncated NegBin
+  // Intensity likelihood family: 0 = shifted Gamma, 1 = shifted NegBin2
   int<lower=0, upper=1> intensity_family;
 
 }
@@ -163,15 +163,11 @@ model {
 
     } else {
 
-      // ------------------------------------------------------------------
-      // Zero-truncated NegBin2: C | C > 0 ~ NegBin2(mu_C, phi_C) / (1 - p0)
-      // ------------------------------------------------------------------
-      real denom_nb = fmax(sigma2_C - mu_C, 1e-6);
-      real phi_C    = fmax(square(mu_C) / denom_nb, 1e-4);
-      real log_p0   = neg_binomial_2_lpmf(0 | mu_C, phi_C);
-      target += neg_binomial_2_lpmf(C_pos_int[idx] | mu_C, phi_C)
-              - log1m_exp(log_p0);
-
+      // Shifted NegBin2: C - 1 ~ NB2(mu_C1, phi_C)
+      real mu_C1    = fmax(mu_C - 1.0, 0.1);
+      real denom_nb = fmax(sigma2_C - mu_C1, 1e-6);
+      real phi_C    = fmax(square(mu_C1) / denom_nb, 1e-4);
+      target += neg_binomial_2_lpmf(C_pos_int[idx] - 1 | mu_C1, phi_C);
     }
   }
 
