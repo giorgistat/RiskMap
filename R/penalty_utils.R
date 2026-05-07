@@ -19,8 +19,8 @@ make_penalty <- function(alpha_a    = NULL,
     stop("rho_mean and rho_sd must be provided when rho_type is specified")
 
   list(
-    alpha_param1 = alpha_a,
-    alpha_param2 = alpha_b,
+    alpha_a = alpha_a,
+    alpha_b = alpha_b,
     gamma_type   = gamma_type,
     gamma_mean   = gamma_mean,
     gamma_sd     = gamma_sd,
@@ -33,21 +33,35 @@ make_penalty <- function(alpha_a    = NULL,
 ##' @title Convert unified penalty to DAST format (list of 6 functions)
 ##' @export
 penalty_to_dast <- function(p) {
+
+  ## alpha: penalty = -log prior (Beta)
   if (!is.null(p$alpha_a) && !is.null(p$alpha_b)) {
     a <- p$alpha_a; b <- p$alpha_b
-    pn    <- function(alpha) (a-1)*log(alpha) + (b-1)*log(1-alpha)
-    pn_d1 <- function(alpha) (a-1)/alpha - (b-1)/(1-alpha)
-    pn_d2 <- function(alpha) -(a-1)/alpha^2 - (b-1)/(1-alpha)^2
+
+    logpi    <- function(alpha) (a-1)*log(alpha) + (b-1)*log(1-alpha)
+    logpi_d1 <- function(alpha) (a-1)/alpha - (b-1)/(1-alpha)
+    logpi_d2 <- function(alpha) -(a-1)/alpha^2 - (b-1)/(1-alpha)^2
+
+    pn    <- function(alpha) -logpi(alpha)
+    pn_d1 <- function(alpha) -logpi_d1(alpha)
+    pn_d2 <- function(alpha) -logpi_d2(alpha)
   } else {
     pn <- pn_d1 <- pn_d2 <- function(x) 0
   }
+
+  ## gamma: penalty = -log prior (lognormal)
   mu <- p$gamma_mean; sd <- p$gamma_sd
-  pn_g    <- function(g) -log(g) - (log(g) - mu)^2 / (2*sd^2)
-  pn_g_d1 <- function(g) -1/g - (log(g) - mu) / (sd^2 * g)
-  pn_g_d2 <- function(g)  1/g^2 - (1 - log(g) + mu) / (sd^2 * g^2)
+
+  logpi_g    <- function(g) -log(g) - (log(g) - mu)^2 / (2*sd^2)
+  logpi_g_d1 <- function(g) -1/g - (log(g) - mu) / (sd^2 * g)
+  logpi_g_d2 <- function(g)  1/g^2 - (1 - log(g) + mu) / (sd^2 * g^2)
+
+  pn_g    <- function(g) -logpi_g(g)
+  pn_g_d1 <- function(g) -logpi_g_d1(g)
+  pn_g_d2 <- function(g) -logpi_g_d2(g)
+
   list(pn, pn_d1, pn_d2, pn_g, pn_g_d1, pn_g_d2)
 }
-
 ##' @title Convert unified penalty to DSGM/TMB format (named scalar list)
 ##' @export
 penalty_to_dsgm <- function(p) {
