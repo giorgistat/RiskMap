@@ -666,12 +666,12 @@ summary.RiskMap <- function(object, ..., conf_level = 0.95) {
     res$vary_k <- object$vary_k
     if(!object$vary_k) {
       res$overdispersion <- rbind(
-        "Aggregation param. (k)" = lnCI(params$k, params_se$k)
+        "Aggregation param." = lnCI(params$k, params_se$k)
       )
     } else {
       res$overdispersion <- rbind(
         "Aggregation param. (Intercept)" = lnCI(params$k, params_se$k),
-        "Worm burden reg. coefficient" = lnCI(params$omega1, params_se$omega1)
+        "Aggregation param. (Log-Worm burden)" = lnCI(params$omega1, params_se$omega1)
       )
     }
 
@@ -966,10 +966,10 @@ print.summary.RiskMap <- function(x, ...) {
   if (isTRUE(x$is_dsgm)) {
 
     if (identical(x$family, "lf_mdiag")) {
-      cat("Doubly stochastic geostatistical model: multiple diagnostics (LF)\n")
+      cat("Doubly stochastic geostatistical model: multiple diagnostics\n")
       cat("Latent worm burden: Negative Binomial\n\n")
     } else {
-      cat("Doubly stochastic geostatistical model: joint prevalence-intensity (STH)\n")
+      cat("Doubly stochastic geostatistical model\n")
       cat("Latent worm burden: Negative Binomial\n")
       # Show intensity likelihood family
       fam_label <- if (identical(x$intensity_family, "negbin"))
