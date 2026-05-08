@@ -288,8 +288,12 @@ pred_over_grid <- function(object,
            !is.null(object$mda_times) && length(object$mda_times) > 0)
 
       if (object$family == "intprev") {
-        par_stan <- list(beta = par_hat$beta, k = par_hat$k, rho = par_hat$rho,
-                         sigma2 = par_hat$sigma2, phi = par_hat$phi)
+        par_stan <- list(beta    = par_hat$beta,
+                         k       = par_hat$k,
+                         rho     = par_hat$rho,
+                         sigma2  = par_hat$sigma2,
+                         phi     = par_hat$phi,
+                         omega1  = par_hat$omega1 %||% 0.0)
         if (use_mda) {
           par_stan$alpha_W <- par_hat$alpha_W %||% object$fix_alpha_W
           par_stan$gamma_W <- par_hat$gamma_W %||% object$fix_gamma_W
@@ -533,6 +537,7 @@ pred_over_grid <- function(object,
   if (obs_loc) out$ID_coords <- object$ID_coords
   out$inter_f  <- inter_f
   out$family   <- object$family
+  if (is_dsgm) out$vary_k <- isTRUE(object$vary_k)
   # Forward gamma_sens for lf_mdiag so pred_target_grid can read it
   if (is_dsgm && !is.null(object$gamma_sens))
     out$gamma_sens <- object$gamma_sens
@@ -676,54 +681,40 @@ pred_target_grid <- function(object,
   if (is.null(f_target)) {
 
     if (sth_model) {
-      k_val   <- object$par_hat$k
-      rho_val <- object$par_hat$rho
-      c_rho   <- 1 - exp(-rho_val)
+      k_val       <- object$par_hat$k
+      rho_val     <- object$par_hat$rho
+      c_rho       <- 1 - exp(-rho_val)
+      log_k_val   <- log(k_val)
+      vary_k_flag <- isTRUE(object$vary_k) && !is.null(object$par_hat$omega1)
+      omega1_val  <- if (vary_k_flag) object$par_hat$omega1 else 0.0
+
+      k_fun <- function(mu_W) {
+        if (vary_k_flag)
+          exp(log_k_val + omega1_val * log(pmax(mu_W, 1e-10)))
+        else
+          array(k_val, dim = dim(mu_W))
+      }
 
       f_target <- list(
         prevalence = function(lp) {
-          # P(at least one egg) = 1 - [k/(k + mu_W*(1-exp(-rho)))]^k
           mu_W <- exp(lp)
-          pr   <- 1 - (k_val / (k_val + mu_W * c_rho))^k_val
+          k_i  <- k_fun(mu_W)
+          pr   <- 1 - (k_i / (k_i + mu_W * c_rho))^k_i
           pmin(pmax(pr, 1e-10), 1 - 1e-10)
         },
         worm_burden = function(lp) {
           exp(lp)
         },
         intensity = function(lp) {
-          # Unconditional mean egg count = rho * mu_W
           rho_val * exp(lp)
         }
       )
 
-    } else if (lf_model) {
-      k_val        <- object$par_hat$k
-      rho_val      <- object$par_hat$rho        # per-worm MF detection rate
-      gamma_s      <- object$gamma_sens          # serological test sensitivity
-      c_rho        <- 1 - exp(-rho_val)
-
-      f_target <- list(
-        mf_prevalence = function(lp) {
-          # P(detect >= 1 MF) via NB PGF evaluated at exp(-rho)
-          # = 1 - [k/(k + mu_W*(1-exp(-rho)))]^k
-          mu_W <- exp(lp)
-          pr   <- 1 - (k_val / (k_val + mu_W * c_rho))^k_val
-          pmin(pmax(pr, 1e-10), 1 - 1e-10)
-        },
-        antigen_prevalence = function(lp) {
-          # gamma_sens * P(W > 0)  =  gamma_sens * (1 - [k/(k+mu_W)]^k)
-          mu_W <- exp(lp)
-          pr   <- gamma_s * (1 - (k_val / (k_val + mu_W))^k_val)
-          pmin(pmax(pr, 1e-10), 1 - 1e-10)
-        },
-        worm_burden = function(lp) {
-          exp(lp)
+      if (vary_k_flag) {
+        f_target$aggregation <- function(lp) {
+          k_fun(exp(lp))
         }
-      )
-
-    } else {
-      # glgpm / DAST: identity on linear predictor
-      f_target <- list(linear_target = function(x) x)
+      }
     }
   }
 
@@ -2801,4 +2792,3 @@ print.summary.RiskMap.sim.res <- function(x, ...) {
 
   invisible(x)
 }
-
