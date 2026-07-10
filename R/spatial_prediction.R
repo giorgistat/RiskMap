@@ -227,8 +227,11 @@ pred_over_grid <- function(object,
 
   mu <- as.numeric(object$D %*% par_hat$beta)
 
-  n_samples <- if (control_sim$linear_model) control_sim$n_sim
-  else (control_sim$n_sim - control_sim$burnin) / control_sim$thin
+  n_samples <- if (control_sim$linear_model) {
+                 control_sim$n_sim
+               } else {
+                 (control_sim$n_sim - control_sim$burnin) / control_sim$thin
+               }
 
   R <- matern_cor(U, phi = par_hat$phi, kappa = object$kappa, return_sym_matrix = TRUE)
 
@@ -250,9 +253,11 @@ pred_over_grid <- function(object,
   diag(R) <- diag(R) + nu2
 
   # diff.y only needed for non-dsgm non-Gaussian and Gaussian paths
-  diff.y <- if (!is_dsgm && object$family != "gaussian") NULL
-  else if (!is_dsgm) object$y - mu
-  else NULL
+  diff.y <- if (!is_dsgm && object$family != "gaussian") {
+               NULL
+            }  else if (!is_dsgm) {
+              object$y - mu
+            }  else NULL
 
   dast_model <- !is.null(object$power_val)
 
@@ -269,9 +274,6 @@ pred_over_grid <- function(object,
       else C %*% Sigma_inv
     }
 
-    # -------------------------------------------------------------------------
-    # FIX 3, 4, 5: DSGM spatial sampling (STH and LF)
-    # -------------------------------------------------------------------------
     if (is_dsgm) {
 
       if (messages)
@@ -1684,7 +1686,11 @@ assess_pp <- function(object,
     is.list(x) && all(vapply(x, inherits, logical(1), what = "RiskMap"))
   }
   is_dast_fit <- function(fit) {
-    !is.null(fit$mda_times) && !is.null(fit$int_mat)
+    as.character(fit$call[[1]])=="dast"
+  }
+
+  is_dsgm_fit <- function(fit) {
+    as.character(fit$call[[1]])=="dsgm"
   }
 
   crps_gaussian <- function(y, mu, sigma) {
@@ -1869,8 +1875,17 @@ assess_pp <- function(object,
                         binomial = plogis,
                         poisson  = exp)
     dast_flag <- is_dast_fit(fit0)
+    dsgm_flag <- is_dsgm_fit(fit0)
+
     if (messages) {
-      message(sprintf("\nModel '%s' (%s)", model_names[h], if (dast_flag) "DAST" else "non-DAST"))
+      message(sprintf("\nModel '%s' (%s)", model_names[h], if (dast_flag) {
+                                                             "DAST"
+                                                           } else if(dsgm_flag) {
+                                                             "DSGM"
+                                                           } else {
+                                                             "GLGM"
+                                                           }
+                                                          ))
     }
 
     ## containers for this model
@@ -1896,7 +1911,7 @@ assess_pp <- function(object,
         }
 
         fit0$crs <- crs_num
-        if (!dast_flag) {
+        if (!dast_flag & !dsgm_flag) {
           ## Original path (unchanged)
           refit_i <- eval(bquote(
             glgpm(.(
@@ -1913,7 +1928,7 @@ assess_pp <- function(object,
               start_pars   = par_hat
             ))
           ))
-        } else {
+        } else if(dast_flag) {
           ## DAST refit
           time_sym <- fit0$call$time
           refit_i <- eval(bquote(
@@ -1933,6 +1948,35 @@ assess_pp <- function(object,
               messages      = FALSE
             )
           ))
+        } else if (dsgm_flag) {
+          ## DSGM refit
+          time_sym <- fit0$call$time
+          refit_i <- eval(bquote(
+            dsgm(
+              formula       = .(fit0$formula),
+              data          = data_sf[in_id, ],
+              den           = .(as.name(den_name)),
+              time          = .(time_sym),
+              intensity_family = .(fit0$intensity_family),
+              gamma_sens = .(fit0$gamma_sens),
+              mda_times     = .(fit0$mda_times),
+              int_mat       = .(fit0$int_mat[in_id, , drop = FALSE]),
+              penalty       = .(fit0$penalty),
+              drop_W        = .(fit0$fix_alpha_W),
+              decay_W       = .(fit0$fix_gamma_W),
+              vary_k        = fit_dsgm$vary_k,
+              power_val     = .(fit0$power_val),
+              crs           = .(fit0$crs),
+              scale_to_km   = .(fit0$scale_to_km),
+              n_samples = fit0$stan_settings$n_samples,
+              n_warmup = fit0$stan_settings$n_warmup,
+              n_chains = fit0$stan_settings$n_chains,
+              adapt_delta = fit0$stan_settings$adapt_delta,
+              max_treedepth = fit0$stan_settings$max_treedepth,
+              return_samples = FALSE,
+              messages      = FALSE
+            )
+          ))
         }
       } else {
         ## quick slice without re-fitting
@@ -1949,9 +1993,19 @@ assess_pp <- function(object,
         if (!is.null(refit_i$ID_re)) {
           refit_i$ID_re <- refit_i$ID_re[keep, , drop = FALSE]
         }
-        if (dast_flag) {
+        if (dast_flag | dsgm_flag) {
           refit_i$survey_times_data <- refit_i$survey_times_data[keep]
           refit_i$int_mat           <- refit_i$int_mat[keep, , drop = FALSE]
+        }
+        if(dsgm_flag) {
+          if(refit_i$family=="intprev") {
+            refit_i$prevalence_data <- refit_i$prevalence_data[keep]
+            refit_i$egg_counts <- refit_i$egg_counts[keep]
+            refit_i$intensity_data <- refit_i$egg_counts[refit_i$egg_counts>0]
+          } else if(refit_i$family=="lf_mdiag") {
+            refit_i$y_counts <- refit_i$y_counts[keep]
+            refit_i$which_diag <- refit_i$which_diag[keep]
+          }
         }
         ## recompute ID_coords mapping
         refit_i$ID_coords <- compute_ID_coords(refit_i$data_sf)$ID_coords
@@ -1959,7 +2013,7 @@ assess_pp <- function(object,
 
       ## ----- held-out set and offsets -----
       data_test_i <- data_sf[out_id, ]
-      data_test_i <- data_test_i[complete.cases(sf::st_drop_geometry(data_test_i)), ]
+      #data_test_i <- data_test_i[complete.cases(sf::st_drop_geometry(data_test_i)), ]
       out$test_set[[i]] <- data_test_i
 
       pred_coff_i <- if (is.null(fit0$cov_offset)) rep(0, nrow(data_test_i)) else fit0$cov_offset[out_id]
@@ -1987,13 +2041,54 @@ assess_pp <- function(object,
         )
 
         mda_eff_cov <- compute_mda_effect(data_test_i[[time_col]],
-                                           mda_times = fit0$mda_times,
+                                           mda_times = refit_i$mda_times,
                                            intervention = grid_pred_list$int_mat,
-                                           alpha = coef.RiskMap(fit0)$alpha,
-                                           gamma = coef.RiskMap(fit0)$gamma, kappa = fit0$power_val)
+                                           alpha = coef.RiskMap(refit_i)$alpha,
+                                           gamma = coef.RiskMap(refit_i)$gamma,
+                                           kappa = refit_i$power_val)
         eta_samp <- t(pred_S$S_samples+pred_S$mu_pred)
         mu_samp  <- t((1/(1+exp(-eta_samp))))*mda_eff_cov
         eta_samp <- t(eta_samp)
+
+      } else if(dsgm_flag) {
+        ## Build the DSGM prediction inputs
+        time_col  <- deparse(fit0$call$time)
+        grid_pred_list <- list(
+          geometry            = sf::st_as_sfc(data_test_i),
+          survey_times_data   = data_test_i[[time_col]],
+          int_mat             = fit0$int_mat[out_id, , drop = FALSE],
+          mda_times           = fit0$mda_times
+        )
+
+        mda_eff_cov <- compute_mda_effect(data_test_i[[time_col]],
+                                          mda_times = refit_i$mda_times,
+                                          intervention = grid_pred_list$int_mat,
+                                          alpha = coef.RiskMap(refit_i)$alpha_W,
+                                          gamma = coef.RiskMap(refit_i)$gamma_W,
+                                          kappa = 1)
+
+        mu_W <- exp(pred_S$S_samples+pred_S$mu_pred)*mda_eff_cov
+        rho_i <- coef(refit_i)$rho; k_i <- coef(refit_i)$k
+        omega1_i <- coef(refit_i)$omega1
+
+        if(refit_i$vary_k) {
+          agg_W <- k_i*mu_W^omega1_i
+        } else {
+          agg_W <- k_i
+        }
+
+        prev_samples <- 1-(agg_W/(agg_W+mu_W*(1-exp(-rho_i))))^agg_W
+
+        mu_C     = (rho_i * mu_W) / prev_samples
+        sigma2_C =
+          (rho_i * mu_W * (1 + rho_i)) / prev_samples +
+          (rho_i^2 * mu_W^2 / prev_samples) * (1/agg_W + 1 - 1/prev_samples)
+
+        if(refit_i$intensity_family=="negbin") {
+          mu_C1    = mu_C - 1
+          denom_nb = sigma2_C - mu_C1
+          phi_C    = mu_C1^2 / denom_nb
+        }
 
       } else {
         pred_lp  <- pred_target_grid(
@@ -2009,8 +2104,14 @@ assess_pp <- function(object,
         mu_samp <- linkfun(eta_samp)
       }
 
-      n_pred <- nrow(eta_samp)
-      n_draw <- ncol(eta_samp)
+      if(!dsgm_flag) {
+        n_pred <- nrow(eta_samp)
+        n_draw <- ncol(eta_samp)
+      } else {
+        n_pred <- nrow(mu_C1)
+        n_draw <- ncol(mu_C1)
+      }
+
       if (get_CRPS)   CRPS [[i]] <- numeric(n_pred)
       if (get_SCRPS) { y_CRPS[[i]] <- numeric(n_pred); SCRPS[[i]] <- numeric(n_pred) }
 
@@ -2029,8 +2130,12 @@ assess_pp <- function(object,
         }
       }
 
-      units_m_i <- fit0$units_m[out_id]
-      y_i       <- fit0$y      [out_id]
+      if(dsgm_flag) {
+        y_i <- fit0$egg_counts[out_id]
+      } else {
+        units_m_i <- fit0$units_m[out_id]
+        y_i       <- fit0$y[out_id]
+      }
 
       for (j in seq_len(n_pred)) {
         if (fam == "gaussian") {
@@ -2046,10 +2151,18 @@ assess_pp <- function(object,
           if (fam == "binomial") {
             y_samp  <- stats::rbinom(n_draw, size = units_m_i[j], prob = mu_samp[j, ])
             support <- 0:units_m_i[j]
-          } else { # Poisson
+          } else if(fam == "poisson") { # Poisson
             lambda  <- units_m_i[j] * mu_samp[j, ]
             y_samp  <- stats::rpois(n_draw, lambda)
             support <- 0:max(max(y_samp), y_i[j], stats::qpois(0.999, mean(lambda)))
+          } else if(fam == "intprev") {
+            if(refit_i$intensity_family=="negbin") {
+              y_samp <- MASS::rnegbin(n_draw, mu = mu_C1[j,], theta = phi_C[j,])+1
+              support <- 0:max(max(y_samp), y_i[j],
+                               qnbinom(0.999,
+                                       size = mean(phi_C[j,]),
+                                       mu  = mean(mu_C1[j,])))
+            }
           }
           pk <- tabulate(y_samp + 1, nbins = length(support)) / n_draw
           Fk <- cumsum(pk)
