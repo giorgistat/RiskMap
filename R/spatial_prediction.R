@@ -2155,13 +2155,23 @@ assess_pp <- function(object,
             lambda  <- units_m_i[j] * mu_samp[j, ]
             y_samp  <- stats::rpois(n_draw, lambda)
             support <- 0:max(max(y_samp), y_i[j], stats::qpois(0.999, mean(lambda)))
-          } else if(fam == "intprev") {
-            if(refit_i$intensity_family=="negbin") {
-              y_samp <- MASS::rnegbin(n_draw, mu = mu_C1[j,], theta = phi_C[j,])+1
+          } else if (fam == "intprev") {
+            if (refit_i$intensity_family == "negbin") {
+              y_samp <- integer(n_draw)
+              y_ind  <- rbinom(n_draw, size = 1, prob = prev_samples[j, ])
+              pos    <- which(y_ind == 1)
+              if (length(pos) > 0) {
+                y_samp[pos] <- MASS::rnegbin(
+                  length(pos),
+                  mu    = mu_C1[j, pos],
+                  theta = phi_C[j, pos]
+                ) + 1
+              }
+              # y_samp[y_ind == 0] stays 0  -> structural zeros retained
               support <- 0:max(max(y_samp), y_i[j],
                                qnbinom(0.999,
-                                       size = mean(phi_C[j,]),
-                                       mu  = mean(mu_C1[j,])))
+                                       size = mean(phi_C[j, ]),
+                                       mu   = mean(mu_C1[j, ])))
             }
           }
           pk <- tabulate(y_samp + 1, nbins = length(support)) / n_draw
