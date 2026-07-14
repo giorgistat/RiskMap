@@ -1895,7 +1895,7 @@ assess_pp <- function(object,
       if (fam == "gaussian") PIT <- vector("list", n_iter) else AnPIT <- vector("list", n_iter)
     }
 
-    ## ----- NEW: containers for hurdle-decomposed diagnostics -----
+    ## containers for hurdle-decomposed diagnostics
     if (dsgm_flag) {
       pos_cal <- vector("list", n_iter)
       if (get_AnPIT) AnPIT_cond <- vector("list", n_iter)
@@ -2022,6 +2022,12 @@ assess_pp <- function(object,
       #data_test_i <- data_test_i[complete.cases(sf::st_drop_geometry(data_test_i)), ]
       out$test_set[[i]] <- data_test_i
 
+      ## Location ID per held-out row, matching on coordinates -- lets
+      ## downstream code average within a location (e.g. multiple
+      ## individuals at one site) before averaging across locations.
+      loc_id_i <- match(sf::st_as_text(sf::st_geometry(data_test_i)),
+                        unique(sf::st_as_text(sf::st_geometry(data_test_i))))
+
       pred_coff_i <- if (is.null(fit0$cov_offset)) rep(0, nrow(data_test_i)) else fit0$cov_offset[out_id]
 
       message("\nModel: ", model_names[h], "\nSpatial prediction for subset ", i)
@@ -2143,6 +2149,7 @@ assess_pp <- function(object,
         y_i       <- fit0$y[out_id]
       }
 
+      ## per-iteration accumulators for hurdle diagnostics
       if (dsgm_flag) {
         obs_pos_i  <- integer(n_pred)   # observed 1(Y > 0)
         pred_pos_i <- numeric(n_pred)   # predicted P(Y > 0)
@@ -2170,7 +2177,7 @@ assess_pp <- function(object,
             support <- 0:max(max(y_samp), y_i[j], stats::qpois(0.999, mean(lambda)))
           } else if(fam == "intprev") {
             if(refit_i$intensity_family=="negbin") {
-
+              ## proper Bernoulli gate + aligned shifted-NB draws
               y_samp <- integer(n_draw)
               y_ind  <- stats::rbinom(n_draw, size = 1, prob = prev_samples[j, ])
               pos    <- which(y_ind == 1)
@@ -2181,7 +2188,14 @@ assess_pp <- function(object,
                   theta = phi_C[j, pos]
                 ) + 1
               }
+              # y_samp[y_ind == 0] stays 0 -> structural zeros retained
 
+              ## Guard only this support computation: mean(phi_C[j,]) /
+              ## mean(mu_C1[j,]) can be non-finite for some folds/locations;
+              ## qnbinom() requires finite positive size/mu. This uses local
+              ## fallback scalars only for computing `support` -- it does not
+              ## alter the phi_C / mu_C1 matrices used elsewhere (gate draw
+              ## above, or the AnPIT_cond draw below).
               size_j <- mean(phi_C[j, ])
               mu_j   <- mean(mu_C1[j, ])
               if (!is.finite(size_j) || size_j <= 0) size_j <- 1e-4
@@ -2202,6 +2216,7 @@ assess_pp <- function(object,
           }
         }
 
+        ## hurdle decomposition diagnostics
         if (dsgm_flag) {
           ## (1) gate: observed vs predicted positivity
           obs_pos_i[j]  <- as.integer(y_i[j] > 0)
@@ -2223,13 +2238,14 @@ assess_pp <- function(object,
         if (fam == "gaussian") PIT[[i]] <- PIT_i else AnPIT[[i]] <- rowMeans(AnPIT_i)
       }
 
-      ## ----- NEW: aggregate hurdle diagnostics for this fold -----
+      ## aggregate hurdle diagnostics for this fold
       if (dsgm_flag) {
         pos_cal[[i]] <- list(
           obs_frac  = mean(obs_pos_i),                 # observed fraction Y > 0
           pred_frac = mean(pred_pos_i),                # model-expected fraction Y > 0
           obs_ind   = obs_pos_i,                        # per-point, for a reliability plot
-          pred_prob = pred_pos_i
+          pred_prob = pred_pos_i,
+          loc_id    = loc_id_i                          # per-point location grouping
         )
         if (get_AnPIT) {
           pos_cols <- which(obs_pos_i == 1)            # positives only
@@ -2248,6 +2264,7 @@ assess_pp <- function(object,
       if (fam == "gaussian") out$model[[model_names[h]]]$PIT <- PIT else out$model[[model_names[h]]]$AnPIT <- AnPIT
     }
 
+    ## write hurdle decomposition diagnostics to output
     if (dsgm_flag) {
       out$model[[model_names[h]]]$pos_cal <- pos_cal
       if (get_AnPIT) out$model[[model_names[h]]]$AnPIT_cond <- AnPIT_cond

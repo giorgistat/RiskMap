@@ -1756,101 +1756,124 @@ plot_AnPIT <- function(object,
 
 
 
-##' Reliability diagnostics for the hurdle/zero-inflation gate
-##'
-##' Assesses how well a hurdle-type model (e.g. a DSGM \code{"intprev"} fit)
-##' captures the fraction of zero counts in held-out data. Uses the
-##' \code{pos_cal} component produced by \code{\link{assess_pp}}, which stores,
-##' for every held-out observation and cross-validation fold, the observed
-##' positivity indicator \eqn{1(Y > 0)} and the model's predicted positivity
-##' probability \eqn{P(Y > 0)} (averaged over posterior draws).
-##'
-##' Two diagnostic panels are produced:
-##' \itemize{
-##'   \item \strong{Reliability diagram}: held-out points are grouped into
-##'     \code{n_bins} bins by predicted \eqn{P(Y > 0)}, and for each bin the
-##'     mean predicted probability is plotted against the observed frequency
-##'     of \eqn{Y > 0}. Points falling on the 1:1 line indicate a
-##'     well-calibrated gate; systematic departures indicate the model is
-##'     over- or under-predicting positivity in that probability range.
-##'   \item \strong{Per-fold zero-fraction comparison}: for each cross-validation
-##'     fold, the observed fraction of zeros (\eqn{1 -} mean observed
-##'     positivity) is plotted against the model-implied fraction of zeros
-##'     (\eqn{1 -} mean predicted positivity), connected by a line segment so
-##'     that discrepancies are immediately visible.
-##' }
-##'
-##' This complements \code{\link{plot_AnPIT}} with \code{which = "conditional"}:
-##' together the two show whether any miscalibration in the overall (mixture)
-##' AnPIT curve arises from the zero-inflation gate, the positive-count
-##' distribution, or both.
-##'
-##' @param object An object of class \code{"RiskMap.spatial.cv"}, as returned
-##'   by \code{\link{assess_pp}}. Must contain a \code{pos_cal} component for
-##'   at least one model (currently only produced for DSGM models with
-##'   \code{family = "intprev"}).
-##' @param model_name Character string giving the name of a single model in
-##'   \code{object$model} to plot. If \code{NULL} (the default), all models
-##'   with a \code{pos_cal} component are included and, where relevant,
-##'   distinguished by colour.
-##' @param n_bins Integer; the number of equal-width bins used to group
-##'   predicted \eqn{P(Y > 0)} values for the reliability diagram. Default is
-##'   \code{10}.
-##' @param combine_panels Logical. If \code{TRUE}, the reliability diagram and
-##'   the per-fold zero-fraction plot are arranged side by side via
-##'   \code{gridExtra::grid.arrange} (if the \pkg{gridExtra} package is
-##'   available). If \code{FALSE} (the default), the two plots are printed
-##'   sequentially.
-##' @param title1,xlab1,ylab1,ylim1 Title, axis labels, and y-axis limits
-##'   (as a length-2 numeric vector) for the reliability diagram (panel 1).
-##' @param title2,xlab2,ylab2,ylim2 Title, axis labels, and y-axis limits
-##'   for the per-fold zero-fraction plot (panel 2). \code{ylim2} defaults
-##'   to \code{NULL} (auto-scaled).
-##'
-##' @return Invisibly, a list with three components:
-##'   \describe{
-##'     \item{\code{reliability}}{A data frame with one row per model/bin,
-##'       giving \code{pred_mean} (mean predicted \eqn{P(Y > 0)} in the bin),
-##'       \code{obs_mean} (observed fraction \eqn{Y > 0} in the bin), and
-##'       \code{n} (number of held-out points in the bin).}
-##'     \item{\code{fold_summary}}{A data frame with one row per model/fold,
-##'       giving \code{obs_frac}/\code{pred_frac} (observed/predicted fraction
-##'       \eqn{Y > 0}) and \code{obs_zero_frac}/\code{pred_zero_frac} (their
-##'       complements, i.e. the zero fractions).}
-##'     \item{\code{pooled}}{The point-level data frame underlying both plots,
-##'       with columns \code{model}, \code{obs} (0/1 indicator), \code{pred}
-##'       (predicted probability), \code{fold}, and \code{bin}.}
-##'   }
-##'   The two plots are also printed (or arranged and printed) as a side
-##'   effect.
-##'
-##' @seealso \code{\link{assess_pp}} for generating \code{object};
-##'   \code{\link{plot_AnPIT}} for the (marginal and conditional-on-positive)
-##'   non-randomized PIT calibration curves.
-##'
-##' @examples
-##' \dontrun{
-##' anpit_hk <- assess_pp(list(DSGM_hk = fit_t),
-##'                       method = "regularized",
-##'                       n_size = 29,
-##'                       min_dist = 5,
-##'                       iter = 2)
-##'
-##' # Both panels, printed sequentially
-##' plot_zero_calibration(anpit_hk)
-##'
-##' # Side by side, coarser binning, custom title and y-limit
-##' res <- plot_zero_calibration(anpit_hk, n_bins = 5, combine_panels = TRUE,
-##'                              title1 = "Hookworm positivity calibration",
-##'                              ylim1 = c(0, 0.6))
-##' res$fold_summary
-##' }
-##'
-##' @export
+#' Reliability diagnostics for the hurdle/zero-inflation gate
+#'
+#' Assesses how well a hurdle-type model (e.g. a DSGM \code{"intprev"} fit)
+#' captures the fraction of zero counts in held-out data. Uses the
+#' \code{pos_cal} component produced by \code{\link{assess_pp}}, which stores,
+#' for every held-out observation and cross-validation fold, the observed
+#' positivity indicator \eqn{1(Y > 0)} and the model's predicted positivity
+#' probability \eqn{P(Y > 0)} (averaged over posterior draws).
+#'
+#' Two diagnostic panels are produced:
+#' \itemize{
+#'   \item \strong{Reliability diagram}: held-out points are grouped into
+#'     \code{n_bins} bins by predicted \eqn{P(Y > 0)}, and for each bin the
+#'     mean predicted probability is plotted against the observed frequency
+#'     of \eqn{Y > 0}. Points falling on the 1:1 line indicate a
+#'     well-calibrated gate; systematic departures indicate the model is
+#'     over- or under-predicting positivity in that probability range.
+#'   \item \strong{Per-fold zero-fraction comparison}: for each cross-validation
+#'     fold, the observed fraction of zeros (\eqn{1 -} mean observed
+#'     positivity) is plotted against the model-implied fraction of zeros
+#'     (\eqn{1 -} mean predicted positivity), connected by a line segment so
+#'     that discrepancies are immediately visible.
+#' }
+#'
+#' This complements \code{\link{plot_AnPIT}} with \code{which = "conditional"}:
+#' together the two show whether any miscalibration in the overall (mixture)
+#' AnPIT curve arises from the zero-inflation gate, the positive-count
+#' distribution, or both.
+#'
+#' @param object An object of class \code{"RiskMap.spatial.cv"}, as returned
+#'   by \code{\link{assess_pp}}. Must contain a \code{pos_cal} component for
+#'   at least one model (currently only produced for DSGM models with
+#'   \code{family = "intprev"}).
+#' @param model_name Character string giving the name of a single model in
+#'   \code{object$model} to plot. If \code{NULL} (the default), all models
+#'   with a \code{pos_cal} component are included and, where relevant,
+#'   distinguished by colour.
+#' @param n_bins Integer; the number of equal-width bins used to group
+#'   predicted \eqn{P(Y > 0)} values for the reliability diagram. Default is
+#'   \code{10}.
+#' @param combine_panels Logical. If \code{TRUE}, the reliability diagram and
+#'   the per-fold zero-fraction plot are arranged side by side via
+#'   \code{gridExtra::grid.arrange} (if the \pkg{gridExtra} package is
+#'   available). If \code{FALSE} (the default), the two plots are printed
+#'   sequentially.
+#' @param by_location Logical. If \code{FALSE} (the default), every held-out
+#'   individual contributes one observation to the diagnostics, so locations
+#'   with more sampled individuals are weighted more heavily. If \code{TRUE},
+#'   observed and predicted positivity are first averaged within each unique
+#'   held-out location (using the \code{loc_id} field produced by
+#'   \code{\link{assess_pp}}), so every location contributes exactly one
+#'   observation regardless of how many individuals were sampled there.
+#'   Requires \code{assess_pp()} to have been run with the location-ID edit
+#'   (i.e. \code{pos_cal} entries must include \code{loc_id}).
+#' @param title1,xlab1,ylab1,ylim1 Title, axis labels, and y-axis limits
+#'   (as a length-2 numeric vector) for the reliability diagram (panel 1).
+#' @param title2,xlab2,ylab2,ylim2 Title, axis labels, and y-axis limits
+#'   for the per-fold zero-fraction plot (panel 2). \code{ylim2} defaults
+#'   to \code{NULL} (auto-scaled).
+#'
+#' When \code{by_location = TRUE}, a third panel is also produced: a scatter
+#' plot of observed vs predicted prevalence, one point per unique held-out
+#' location (averaged over individuals at that location), coloured by fold /
+#' test set.
+#'
+#' @return Invisibly, a list with:
+#'   \describe{
+#'     \item{\code{reliability}}{A data frame with one row per model/bin,
+#'       giving \code{pred_mean} (mean predicted \eqn{P(Y > 0)} in the bin),
+#'       \code{obs_mean} (observed fraction \eqn{Y > 0} in the bin), and
+#'       \code{n} (number of held-out points in the bin).}
+#'     \item{\code{fold_summary}}{A data frame with one row per model/fold,
+#'       giving \code{obs_frac}/\code{pred_frac} (observed/predicted fraction
+#'       \eqn{Y > 0}) and \code{obs_zero_frac}/\code{pred_zero_frac} (their
+#'       complements, i.e. the zero fractions).}
+#'     \item{\code{pooled}}{The point-level data frame underlying the plots.
+#'       When \code{by_location = FALSE}, one row per held-out individual,
+#'       with columns \code{model}, \code{obs} (0/1 indicator), \code{pred}
+#'       (predicted probability), \code{fold}, and \code{bin}. When
+#'       \code{by_location = TRUE}, one row per (model, fold, location),
+#'       with \code{obs}/\code{pred} averaged within location.}
+#'     \item{\code{by_location}}{The value of the \code{by_location} argument
+#'       used, for traceability.}
+#'     \item{\code{p_reliability}, \code{p_fold}}{The two ggplot objects,
+#'       returned so they can be re-printed, saved, or recombined.}
+#'     \item{\code{p_location}}{The location-level scatter plot (a ggplot
+#'       object) when \code{by_location = TRUE}, otherwise \code{NULL}.}
+#'   }
+#'   The plots are also printed (or arranged and printed) as a side effect.
+#'
+#' @seealso \code{\link{assess_pp}} for generating \code{object};
+#'   \code{\link{plot_AnPIT}} for the (marginal and conditional-on-positive)
+#'   non-randomized PIT calibration curves.
+#'
+#' @examples
+#' \dontrun{
+#' anpit_hk <- assess_pp(list(DSGM_hk = fit_t),
+#'                       method = "regularized",
+#'                       n_size = 29,
+#'                       min_dist = 5,
+#'                       iter = 2)
+#'
+#' # Both panels, printed sequentially
+#' plot_zero_calibration(anpit_hk)
+#'
+#' # Side by side, coarser binning, custom title and y-limit
+#' res <- plot_zero_calibration(anpit_hk, n_bins = 5, combine_panels = TRUE,
+#'                              title1 = "Hookworm positivity calibration",
+#'                              ylim1 = c(0, 0.6))
+#' res$fold_summary
+#' }
+#'
+#' @export
 plot_zero_calibration <- function(object,
                                   model_name = NULL,
                                   n_bins = 10,
                                   combine_panels = FALSE,
+                                  by_location = FALSE,
                                   title1 = "Positivity-gate reliability: predicted vs observed P(Y > 0)",
                                   xlab1 = "Mean predicted P(Y > 0) in bin",
                                   ylab1 = "Observed fraction Y > 0 in bin",
@@ -1859,6 +1882,9 @@ plot_zero_calibration <- function(object,
                                   xlab2 = "Test fold",
                                   ylab2 = "Fraction Y = 0",
                                   ylim2 = NULL) {
+  missing_title1 <- missing(title1)
+  missing_title2 <- missing(title2)
+
   if (!inherits(object, "RiskMap.spatial.cv"))
     stop("`object` must be a 'RiskMap.spatial.cv' produced by assess_pp().")
 
@@ -1869,7 +1895,7 @@ plot_zero_calibration <- function(object,
     all_models <- model_name
   }
 
-  ## pool obs_ind / pred_prob across test-set folds, per model
+  ## pool obs_ind / pred_prob / loc_id across test-set folds, per model
   make_pool <- function(mname) {
     m <- object$model[[mname]]
     if (is.null(m$pos_cal))
@@ -1881,21 +1907,49 @@ plot_zero_calibration <- function(object,
     fold_id   <- rep(seq_along(m$pos_cal),
                      vapply(m$pos_cal, function(x) length(x$obs_ind), integer(1)))
 
-    data.frame(model = mname, obs = obs_ind, pred = pred_prob, fold = fold_id)
+    if (by_location) {
+      if (is.null(m$pos_cal[[1]]$loc_id))
+        stop("Model '", mname, "' has no `loc_id` in `pos_cal` — re-run ",
+             "assess_pp() with the location-ID edit to use by_location = TRUE.")
+      loc_id <- unlist(lapply(m$pos_cal, `[[`, "loc_id"))
+      ## loc_id is only unique *within* a fold, so combine with fold_id
+      ## to get a globally unique location key across folds.
+      loc_key <- paste(fold_id, loc_id, sep = "_")
+    } else {
+      loc_key <- NA_character_
+    }
+
+    data.frame(model = mname, obs = obs_ind, pred = pred_prob,
+               fold = fold_id, loc_key = loc_key)
   }
 
   pooled <- do.call(rbind, lapply(all_models, make_pool))
 
-  ## per-fold summary (headline numbers: observed vs model-implied zero fraction)
-  fold_summary <- do.call(rbind, lapply(all_models, function(mname) {
-    m <- object$model[[mname]]
-    data.frame(
-      model     = mname,
-      fold      = seq_along(m$pos_cal),
-      obs_frac  = vapply(m$pos_cal, `[[`, numeric(1), "obs_frac"),
-      pred_frac = vapply(m$pos_cal, `[[`, numeric(1), "pred_frac")
-    )
-  }))
+  ## If by_location: collapse to one row per (model, fold, location) by
+  ## averaging obs/pred within location first, so every location counts
+  ## once regardless of how many individuals were sampled there.
+  if (by_location) {
+    pooled <- pooled %>%
+      dplyr::group_by(model, fold, loc_key) %>%
+      dplyr::summarize(
+        obs  = mean(obs,  na.rm = TRUE),
+        pred = mean(pred, na.rm = TRUE),
+        .groups = "drop"
+      )
+  }
+
+  ## per-fold summary (headline numbers: observed vs model-implied zero fraction).
+  ## Computed from `pooled` so it respects by_location -- the obs_frac/pred_frac
+  ## stored directly in pos_cal are always individual-weighted, so we recompute
+  ## here rather than reuse them when by_location = TRUE.
+  fold_summary <- pooled %>%
+    dplyr::group_by(model, fold) %>%
+    dplyr::summarize(
+      obs_frac  = mean(obs,  na.rm = TRUE),
+      pred_frac = mean(pred, na.rm = TRUE),
+      .groups   = "drop"
+    ) %>%
+    as.data.frame()
   fold_summary$obs_zero_frac  <- 1 - fold_summary$obs_frac
   fold_summary$pred_zero_frac <- 1 - fold_summary$pred_frac
 
@@ -1912,8 +1966,31 @@ plot_zero_calibration <- function(object,
       .groups   = "drop"
     )
 
+  if (by_location) {
+    if (missing_title1) title1 <- paste(title1, "(location-level)")
+    if (missing_title2) title2 <- paste(title2, "(location-level)")
+  }
+
   id_line <- ggplot2::geom_abline(intercept = 0, slope = 1,
                                   linetype = "dashed", colour = "red")
+
+  ## Location-level scatter: observed vs predicted prevalence per location,
+  ## coloured by fold/test set. Only meaningful when by_location = TRUE,
+  ## since `pooled` then has exactly one row per (model, fold, location).
+  p_location <- NULL
+  if (by_location) {
+    p_location <- ggplot2::ggplot(pooled,
+                                  ggplot2::aes(pred, obs, colour = factor(fold))) +
+      ggplot2::geom_point(alpha = 0.8) +
+      id_line +
+      ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+      ggplot2::labs(title = "Observed vs predicted prevalence by location",
+                    x = "Predicted prevalence (location mean)",
+                    y = "Observed prevalence (location mean)",
+                    colour = "Test set") +
+      ggplot2::theme_minimal() +
+      { if (length(all_models) > 1) ggplot2::facet_wrap(~model) else NULL }
+  }
 
   ## Only connect points with a line for models that have >=2 populated
   ## bins -- geom_line() warns (and draws nothing useful) for a group with
@@ -1954,15 +2031,22 @@ plot_zero_calibration <- function(object,
     { if (!is.null(ylim2)) ggplot2::coord_cartesian(ylim = ylim2) else NULL }
 
   if (combine_panels && requireNamespace("gridExtra", quietly = TRUE)) {
-    gridExtra::grid.arrange(p_reliability, p_fold, ncol = 2)
+    if (!is.null(p_location)) {
+      gridExtra::grid.arrange(p_reliability, p_fold, p_location, ncol = 2)
+    } else {
+      gridExtra::grid.arrange(p_reliability, p_fold, ncol = 2)
+    }
   } else {
     print(p_reliability)
     print(p_fold)
+    if (!is.null(p_location)) print(p_location)
   }
 
-  invisible(list(reliability = reliability, fold_summary = fold_summary, pooled = pooled))
+  invisible(list(reliability = reliability, fold_summary = fold_summary,
+                 pooled = pooled, by_location = by_location,
+                 p_reliability = p_reliability, p_fold = p_fold,
+                 p_location = p_location))
 }
-
 ##' @title Plot Spatial Scores for a Specific Model and Metric
 ##'
 ##' @description This function visualizes spatial scores for a specified model and metric.
