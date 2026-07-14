@@ -1638,33 +1638,40 @@ print.summary.RiskMap.spatial.cv <- function(x, ...) {
 ##' @export
 plot_AnPIT <- function(object,
                        mode = "average",
+                       which = c("marginal", "conditional"),
                        test_set = NULL,
                        model_name = NULL,
                        combine_panels = FALSE) {
-
   if (!inherits(object, "RiskMap.spatial.cv"))
     stop("`object` must be a 'RiskMap.spatial.cv' produced by assess_pp().")
-
+  which <- match.arg(which)
   all_models <- names(object$model)
-
   if (!is.null(model_name)) {
     if (!model_name %in% all_models)
       stop("Model name '", model_name, "' not found in `object$model`.")
     all_models <- model_name
   }
-
   make_df <- function(mname) {
     m <- object$model[[mname]]
-    if (!is.null(m$AnPIT)) {
-      lapply(seq_along(m$AnPIT), function(j) {
-        curve_vals <- m$AnPIT[[j]]
-        if (length(curve_vals) == 0) return(NULL)
+
+    ## ----- NEW: pull from AnPIT_cond when which = "conditional" -----
+    pit_field <- if (which == "conditional") "AnPIT_cond" else "AnPIT"
+
+    if (which == "conditional" && is.null(m[[pit_field]]))
+      stop("Model '", mname, "' has no `AnPIT_cond` — re-run assess_pp() ",
+           "with the hurdle-decomposition edits, and only DSGM/intprev ",
+           "models produce this.")
+
+    if (!is.null(m[[pit_field]])) {
+      lapply(seq_along(m[[pit_field]]), function(j) {
+        curve_vals <- m[[pit_field]][[j]]
+        if (length(curve_vals) == 0 || all(is.na(curve_vals))) return(NULL)
         data.frame(
           u_val   = seq(0, 1, length.out = length(curve_vals)),
           value   = curve_vals,
           test_set = j,
           model    = mname,
-          type     = "AnPIT"
+          type     = if (which == "conditional") "AnPIT (Y > 0)" else "AnPIT"
         )
       })
     } else if (!is.null(m$PIT)) {
@@ -1684,23 +1691,17 @@ plot_AnPIT <- function(object,
       NULL
     }
   }
-
   plot_data <- do.call(rbind, unlist(lapply(all_models, make_df), recursive = FALSE))
-
   if (is.null(plot_data) || nrow(plot_data) == 0)
     stop("No AnPIT or PIT data available for plotting.")
-
   y_label <- unique(plot_data$type)
   if (length(y_label) > 1) y_label <- "Calibration curve"
-
   id_line <- geom_abline(intercept = 0, slope = 1,
                          linetype = "dashed", colour = "red")
-
   if (mode == "average" && combine_panels) {
     avg <- plot_data %>%
       dplyr::group_by(model, u_val) %>%
-      dplyr::summarize(value = mean(value), .groups = "drop")
-
+      dplyr::summarize(value = mean(value, na.rm = TRUE), .groups = "drop")
     return(
       ggplot(avg, aes(u_val, value, colour = model)) +
         geom_line() + id_line +
@@ -1710,7 +1711,6 @@ plot_AnPIT <- function(object,
         guides(colour = guide_legend(title = "Model"))
     )
   }
-
   build_plot <- function(df, title_suffix = "") {
     ggplot(df, aes(u_val, value,
                    colour = if (mode == "all") as.factor(test_set) else NULL)) +
@@ -1719,16 +1719,14 @@ plot_AnPIT <- function(object,
       theme_minimal() +
       guides(colour = guide_legend(title = "Test set"))
   }
-
   plots <- list()
   for (mname in all_models) {
     df_model <- dplyr::filter(plot_data, model == mname)
-
     p <- switch(mode,
                 average = {
                   avg <- df_model %>%
                     dplyr::group_by(u_val) %>%
-                    dplyr::summarize(value = mean(value), .groups = "drop")
+                    dplyr::summarize(value = mean(value, na.rm = TRUE), .groups = "drop")
                   avg$type <- unique(df_model$type)
                   build_plot(avg, paste("Model", mname, ": average"))
                 },
@@ -1745,10 +1743,8 @@ plot_AnPIT <- function(object,
                                      paste("Model", mname, "- all test sets")),
                 stop("Invalid `mode`. Use 'average', 'single' or 'all'.")
     )
-
     plots[[mname]] <- p
   }
-
   if (length(plots) == 1) {
     plots[[1]]
   } else {
@@ -1758,6 +1754,214 @@ plot_AnPIT <- function(object,
   }
 }
 
+
+
+##' Reliability diagnostics for the hurdle/zero-inflation gate
+##'
+##' Assesses how well a hurdle-type model (e.g. a DSGM \code{"intprev"} fit)
+##' captures the fraction of zero counts in held-out data. Uses the
+##' \code{pos_cal} component produced by \code{\link{assess_pp}}, which stores,
+##' for every held-out observation and cross-validation fold, the observed
+##' positivity indicator \eqn{1(Y > 0)} and the model's predicted positivity
+##' probability \eqn{P(Y > 0)} (averaged over posterior draws).
+##'
+##' Two diagnostic panels are produced:
+##' \itemize{
+##'   \item \strong{Reliability diagram}: held-out points are grouped into
+##'     \code{n_bins} bins by predicted \eqn{P(Y > 0)}, and for each bin the
+##'     mean predicted probability is plotted against the observed frequency
+##'     of \eqn{Y > 0}. Points falling on the 1:1 line indicate a
+##'     well-calibrated gate; systematic departures indicate the model is
+##'     over- or under-predicting positivity in that probability range.
+##'   \item \strong{Per-fold zero-fraction comparison}: for each cross-validation
+##'     fold, the observed fraction of zeros (\eqn{1 -} mean observed
+##'     positivity) is plotted against the model-implied fraction of zeros
+##'     (\eqn{1 -} mean predicted positivity), connected by a line segment so
+##'     that discrepancies are immediately visible.
+##' }
+##'
+##' This complements \code{\link{plot_AnPIT}} with \code{which = "conditional"}:
+##' together the two show whether any miscalibration in the overall (mixture)
+##' AnPIT curve arises from the zero-inflation gate, the positive-count
+##' distribution, or both.
+##'
+##' @param object An object of class \code{"RiskMap.spatial.cv"}, as returned
+##'   by \code{\link{assess_pp}}. Must contain a \code{pos_cal} component for
+##'   at least one model (currently only produced for DSGM models with
+##'   \code{family = "intprev"}).
+##' @param model_name Character string giving the name of a single model in
+##'   \code{object$model} to plot. If \code{NULL} (the default), all models
+##'   with a \code{pos_cal} component are included and, where relevant,
+##'   distinguished by colour.
+##' @param n_bins Integer; the number of equal-width bins used to group
+##'   predicted \eqn{P(Y > 0)} values for the reliability diagram. Default is
+##'   \code{10}.
+##' @param combine_panels Logical. If \code{TRUE}, the reliability diagram and
+##'   the per-fold zero-fraction plot are arranged side by side via
+##'   \code{gridExtra::grid.arrange} (if the \pkg{gridExtra} package is
+##'   available). If \code{FALSE} (the default), the two plots are printed
+##'   sequentially.
+##' @param title1,xlab1,ylab1,ylim1 Title, axis labels, and y-axis limits
+##'   (as a length-2 numeric vector) for the reliability diagram (panel 1).
+##' @param title2,xlab2,ylab2,ylim2 Title, axis labels, and y-axis limits
+##'   for the per-fold zero-fraction plot (panel 2). \code{ylim2} defaults
+##'   to \code{NULL} (auto-scaled).
+##'
+##' @return Invisibly, a list with three components:
+##'   \describe{
+##'     \item{\code{reliability}}{A data frame with one row per model/bin,
+##'       giving \code{pred_mean} (mean predicted \eqn{P(Y > 0)} in the bin),
+##'       \code{obs_mean} (observed fraction \eqn{Y > 0} in the bin), and
+##'       \code{n} (number of held-out points in the bin).}
+##'     \item{\code{fold_summary}}{A data frame with one row per model/fold,
+##'       giving \code{obs_frac}/\code{pred_frac} (observed/predicted fraction
+##'       \eqn{Y > 0}) and \code{obs_zero_frac}/\code{pred_zero_frac} (their
+##'       complements, i.e. the zero fractions).}
+##'     \item{\code{pooled}}{The point-level data frame underlying both plots,
+##'       with columns \code{model}, \code{obs} (0/1 indicator), \code{pred}
+##'       (predicted probability), \code{fold}, and \code{bin}.}
+##'   }
+##'   The two plots are also printed (or arranged and printed) as a side
+##'   effect.
+##'
+##' @seealso \code{\link{assess_pp}} for generating \code{object};
+##'   \code{\link{plot_AnPIT}} for the (marginal and conditional-on-positive)
+##'   non-randomized PIT calibration curves.
+##'
+##' @examples
+##' \dontrun{
+##' anpit_hk <- assess_pp(list(DSGM_hk = fit_t),
+##'                       method = "regularized",
+##'                       n_size = 29,
+##'                       min_dist = 5,
+##'                       iter = 2)
+##'
+##' # Both panels, printed sequentially
+##' plot_zero_calibration(anpit_hk)
+##'
+##' # Side by side, coarser binning, custom title and y-limit
+##' res <- plot_zero_calibration(anpit_hk, n_bins = 5, combine_panels = TRUE,
+##'                              title1 = "Hookworm positivity calibration",
+##'                              ylim1 = c(0, 0.6))
+##' res$fold_summary
+##' }
+##'
+##' @export
+plot_zero_calibration <- function(object,
+                                  model_name = NULL,
+                                  n_bins = 10,
+                                  combine_panels = FALSE,
+                                  title1 = "Positivity-gate reliability: predicted vs observed P(Y > 0)",
+                                  xlab1 = "Mean predicted P(Y > 0) in bin",
+                                  ylab1 = "Observed fraction Y > 0 in bin",
+                                  ylim1 = c(0, 1),
+                                  title2 = "Fraction of zeros: observed vs model-implied, by test fold",
+                                  xlab2 = "Test fold",
+                                  ylab2 = "Fraction Y = 0",
+                                  ylim2 = NULL) {
+  if (!inherits(object, "RiskMap.spatial.cv"))
+    stop("`object` must be a 'RiskMap.spatial.cv' produced by assess_pp().")
+
+  all_models <- names(object$model)
+  if (!is.null(model_name)) {
+    if (!model_name %in% all_models)
+      stop("Model name '", model_name, "' not found in `object$model`.")
+    all_models <- model_name
+  }
+
+  ## pool obs_ind / pred_prob across test-set folds, per model
+  make_pool <- function(mname) {
+    m <- object$model[[mname]]
+    if (is.null(m$pos_cal))
+      stop("Model '", mname, "' has no `pos_cal` — this diagnostic is only ",
+           "produced for DSGM/intprev models by the updated assess_pp().")
+
+    obs_ind   <- unlist(lapply(m$pos_cal, `[[`, "obs_ind"))
+    pred_prob <- unlist(lapply(m$pos_cal, `[[`, "pred_prob"))
+    fold_id   <- rep(seq_along(m$pos_cal),
+                     vapply(m$pos_cal, function(x) length(x$obs_ind), integer(1)))
+
+    data.frame(model = mname, obs = obs_ind, pred = pred_prob, fold = fold_id)
+  }
+
+  pooled <- do.call(rbind, lapply(all_models, make_pool))
+
+  ## per-fold summary (headline numbers: observed vs model-implied zero fraction)
+  fold_summary <- do.call(rbind, lapply(all_models, function(mname) {
+    m <- object$model[[mname]]
+    data.frame(
+      model     = mname,
+      fold      = seq_along(m$pos_cal),
+      obs_frac  = vapply(m$pos_cal, `[[`, numeric(1), "obs_frac"),
+      pred_frac = vapply(m$pos_cal, `[[`, numeric(1), "pred_frac")
+    )
+  }))
+  fold_summary$obs_zero_frac  <- 1 - fold_summary$obs_frac
+  fold_summary$pred_zero_frac <- 1 - fold_summary$pred_frac
+
+  ## reliability bins: bin by predicted P(Y>0), compare to observed frequency
+  pooled$bin <- cut(pooled$pred, breaks = seq(0, 1, length.out = n_bins + 1),
+                    include.lowest = TRUE)
+
+  reliability <- pooled %>%
+    dplyr::group_by(model, bin) %>%
+    dplyr::summarize(
+      pred_mean = mean(pred, na.rm = TRUE),
+      obs_mean  = mean(obs,  na.rm = TRUE),
+      n         = dplyr::n(),
+      .groups   = "drop"
+    )
+
+  id_line <- ggplot2::geom_abline(intercept = 0, slope = 1,
+                                  linetype = "dashed", colour = "red")
+
+  ## Only connect points with a line for models that have >=2 populated
+  ## bins -- geom_line() warns (and draws nothing useful) for a group with
+  ## a single observation, which can happen with small held-out samples.
+  reliability_line <- reliability %>%
+    dplyr::group_by(model) %>%
+    dplyr::filter(dplyr::n() >= 2) %>%
+    dplyr::ungroup()
+
+  p_reliability <- ggplot2::ggplot(reliability,
+                                   ggplot2::aes(pred_mean, obs_mean,
+                                                size = n,
+                                                colour = if (length(all_models) > 1) model else NULL)) +
+    ggplot2::geom_point(alpha = 0.8) +
+    { if (nrow(reliability_line) > 0)
+      ggplot2::geom_line(data = reliability_line,
+                         ggplot2::aes(group = model), alpha = 0.5, linewidth = 0.6)
+      else NULL } +
+    id_line +
+    ggplot2::coord_cartesian(xlim = c(0, 1), ylim = ylim1) +
+    ggplot2::labs(title = title1,
+                  x = xlab1,
+                  y = ylab1,
+                  size = "n points") +
+    ggplot2::theme_minimal() +
+    ggplot2::guides(colour = ggplot2::guide_legend(title = "Model"))
+
+  ## per-fold check on the zero fraction specifically
+  p_fold <- ggplot2::ggplot(fold_summary,
+                            ggplot2::aes(x = factor(fold), colour = model)) +
+    ggplot2::geom_point(ggplot2::aes(y = obs_zero_frac, shape = "Observed"), size = 3) +
+    ggplot2::geom_point(ggplot2::aes(y = pred_zero_frac, shape = "Predicted (model)"), size = 3) +
+    ggplot2::geom_segment(ggplot2::aes(xend = factor(fold), y = obs_zero_frac, yend = pred_zero_frac),
+                          alpha = 0.4) +
+    ggplot2::labs(title = title2,
+                  x = xlab2, y = ylab2, shape = "") +
+    ggplot2::theme_minimal() +
+    { if (!is.null(ylim2)) ggplot2::coord_cartesian(ylim = ylim2) else NULL }
+
+  if (combine_panels && requireNamespace("gridExtra", quietly = TRUE)) {
+    gridExtra::grid.arrange(p_reliability, p_fold, ncol = 2)
+  } else {
+    print(p_reliability)
+    print(p_fold)
+  }
+
+  invisible(list(reliability = reliability, fold_summary = fold_summary, pooled = pooled))
+}
 
 ##' @title Plot Spatial Scores for a Specific Model and Metric
 ##'

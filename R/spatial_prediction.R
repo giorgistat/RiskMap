@@ -1879,13 +1879,13 @@ assess_pp <- function(object,
 
     if (messages) {
       message(sprintf("\nModel '%s' (%s)", model_names[h], if (dast_flag) {
-                                                             "DAST"
-                                                           } else if(dsgm_flag) {
-                                                             "DSGM"
-                                                           } else {
-                                                             "GLGM"
-                                                           }
-                                                          ))
+        "DAST"
+      } else if(dsgm_flag) {
+        "DSGM"
+      } else {
+        "GLGM"
+      }
+      ))
     }
 
     ## containers for this model
@@ -1893,6 +1893,12 @@ assess_pp <- function(object,
     if (get_SCRPS) { y_CRPS <- vector("list", n_iter); SCRPS <- vector("list", n_iter) }
     if (get_AnPIT) {
       if (fam == "gaussian") PIT <- vector("list", n_iter) else AnPIT <- vector("list", n_iter)
+    }
+
+    ## ----- NEW: containers for hurdle-decomposed diagnostics -----
+    if (dsgm_flag) {
+      pos_cal <- vector("list", n_iter)
+      if (get_AnPIT) AnPIT_cond <- vector("list", n_iter)
     }
 
     ## ─────────────────── iterate over CV splits (refit as needed) ─────────────────── ##
@@ -2041,11 +2047,11 @@ assess_pp <- function(object,
         )
 
         mda_eff_cov <- compute_mda_effect(data_test_i[[time_col]],
-                                           mda_times = refit_i$mda_times,
-                                           intervention = grid_pred_list$int_mat,
-                                           alpha = coef.RiskMap(refit_i)$alpha,
-                                           gamma = coef.RiskMap(refit_i)$gamma,
-                                           kappa = refit_i$power_val)
+                                          mda_times = refit_i$mda_times,
+                                          intervention = grid_pred_list$int_mat,
+                                          alpha = coef.RiskMap(refit_i)$alpha,
+                                          gamma = coef.RiskMap(refit_i)$gamma,
+                                          kappa = refit_i$power_val)
         eta_samp <- t(pred_S$S_samples+pred_S$mu_pred)
         mu_samp  <- t((1/(1+exp(-eta_samp))))*mda_eff_cov
         eta_samp <- t(eta_samp)
@@ -2078,6 +2084,13 @@ assess_pp <- function(object,
         }
 
         prev_samples <- 1-(agg_W/(agg_W+mu_W*(1-exp(-rho_i))))^agg_W
+        ## Guard against exact 0/1 (and any non-finite fallout from agg_W/mu_W
+        ## extremes) before using prev_samples as a divisor below.
+        ## NB: pmax()/pmin() do NOT rescue NaN/NA/Inf -- any comparison
+        ## involving NaN/NA returns NA, so non-finite values must be replaced
+        ## with an explicit finite fallback *before* clamping to [1e-8, 1-1e-8].
+        prev_samples[!is.finite(prev_samples)] <- 0.5
+        prev_samples <- pmin(pmax(prev_samples, 1e-8), 1 - 1e-8)
 
         mu_C     = (rho_i * mu_W) / prev_samples
         sigma2_C =
@@ -2085,9 +2098,22 @@ assess_pp <- function(object,
           (rho_i^2 * mu_W^2 / prev_samples) * (1/agg_W + 1 - 1/prev_samples)
 
         if(refit_i$intensity_family=="negbin") {
+          ## Apply same floors as Stan's neg_binomial_2 likelihood block
+          ## (fmax(mu_C - 1, 0.1); fmax(sigma2_C - mu_C1, 1e-6); fmax(mu_C1^2/denom_nb, 1e-4)),
+          ## but first replace any non-finite values (NaN/Inf) with the floor
+          ## itself -- pmax() alone does NOT rescue NaN/Inf, it only clips
+          ## finite values that are too small.
           mu_C1    = mu_C - 1
+          mu_C1[!is.finite(mu_C1)] <- 0.1
+          mu_C1    = pmax(mu_C1, 0.1)
+
           denom_nb = sigma2_C - mu_C1
+          denom_nb[!is.finite(denom_nb)] <- 1e-6
+          denom_nb = pmax(denom_nb, 1e-6)
+
           phi_C    = mu_C1^2 / denom_nb
+          phi_C[!is.finite(phi_C)] <- 1e-4
+          phi_C    = pmax(phi_C, 1e-4)
         }
 
       } else {
@@ -2137,6 +2163,14 @@ assess_pp <- function(object,
         y_i       <- fit0$y[out_id]
       }
 
+      ## ----- NEW: per-iteration accumulators for hurdle diagnostics -----
+      if (dsgm_flag) {
+        obs_pos_i  <- integer(n_pred)   # observed 1(Y > 0)
+        pred_pos_i <- numeric(n_pred)   # predicted P(Y > 0)
+        if (get_AnPIT)
+          AnPIT_cond_i <- matrix(NA_real_, nrow = length(u_val), ncol = n_pred)
+      }
+
       for (j in seq_len(n_pred)) {
         if (fam == "gaussian") {
           mu_j <- mean(mu_samp[j, ])
@@ -2155,10 +2189,11 @@ assess_pp <- function(object,
             lambda  <- units_m_i[j] * mu_samp[j, ]
             y_samp  <- stats::rpois(n_draw, lambda)
             support <- 0:max(max(y_samp), y_i[j], stats::qpois(0.999, mean(lambda)))
-          } else if (fam == "intprev") {
-            if (refit_i$intensity_family == "negbin") {
+          } else if(fam == "intprev") {
+            if(refit_i$intensity_family=="negbin") {
+              ## ----- FIXED: proper Bernoulli gate + aligned shifted-NB draws -----
               y_samp <- integer(n_draw)
-              y_ind  <- rbinom(n_draw, size = 1, prob = prev_samples[j, ])
+              y_ind  <- stats::rbinom(n_draw, size = 1, prob = prev_samples[j, ])
               pos    <- which(y_ind == 1)
               if (length(pos) > 0) {
                 y_samp[pos] <- MASS::rnegbin(
@@ -2167,11 +2202,11 @@ assess_pp <- function(object,
                   theta = phi_C[j, pos]
                 ) + 1
               }
-              # y_samp[y_ind == 0] stays 0  -> structural zeros retained
+              # y_samp[y_ind == 0] stays 0 -> structural zeros retained
               support <- 0:max(max(y_samp), y_i[j],
                                qnbinom(0.999,
                                        size = mean(phi_C[j, ]),
-                                       mu   = mean(mu_C1[j, ])))
+                                       mu  = mean(mu_C1[j, ])))
             }
           }
           pk <- tabulate(y_samp + 1, nbins = length(support)) / n_draw
@@ -2185,10 +2220,42 @@ assess_pp <- function(object,
             AnPIT_i[, j] <- vapply(u_val, npit_fun, numeric(1), y = y_i[j], Fk = Fk)
           }
         }
+
+        ## ----- NEW: hurdle decomposition diagnostics -----
+        if (dsgm_flag) {
+          ## (1) gate: observed vs predicted positivity
+          obs_pos_i[j]  <- as.integer(y_i[j] > 0)
+          pred_pos_i[j] <- mean(prev_samples[j, ])
+
+          ## (2) AnPIT conditional on Y > 0, using the shifted-NB (positive) predictive only
+          if (get_AnPIT && y_i[j] > 0) {
+            y_cond    <- MASS::rnegbin(n_draw, mu = mu_C1[j, ], theta = phi_C[j, ]) + 1
+            supp_cond <- 0:max(max(y_cond), y_i[j])
+            pk_cond   <- tabulate(y_cond + 1, nbins = length(supp_cond)) / n_draw
+            Fk_cond   <- cumsum(pk_cond)
+            AnPIT_cond_i[, j] <- vapply(u_val, npit_fun, numeric(1),
+                                        y = y_i[j], Fk = Fk_cond)
+          }
+        }
       }
 
       if (get_AnPIT) {
         if (fam == "gaussian") PIT[[i]] <- PIT_i else AnPIT[[i]] <- rowMeans(AnPIT_i)
+      }
+
+      ## ----- NEW: aggregate hurdle diagnostics for this fold -----
+      if (dsgm_flag) {
+        pos_cal[[i]] <- list(
+          obs_frac  = mean(obs_pos_i),                 # observed fraction Y > 0
+          pred_frac = mean(pred_pos_i),                # model-expected fraction Y > 0
+          obs_ind   = obs_pos_i,                        # per-point, for a reliability plot
+          pred_prob = pred_pos_i
+        )
+        if (get_AnPIT) {
+          pos_cols <- which(obs_pos_i == 1)            # positives only
+          AnPIT_cond[[i]] <- if (length(pos_cols) > 0)
+            rowMeans(AnPIT_cond_i[, pos_cols, drop = FALSE]) else rep(NA_real_, length(u_val))
+        }
       }
 
     } # end i loop
@@ -2201,12 +2268,17 @@ assess_pp <- function(object,
       if (fam == "gaussian") out$model[[model_names[h]]]$PIT <- PIT else out$model[[model_names[h]]]$AnPIT <- AnPIT
     }
 
+    ## ----- NEW: write hurdle decomposition diagnostics to output -----
+    if (dsgm_flag) {
+      out$model[[model_names[h]]]$pos_cal <- pos_cal
+      if (get_AnPIT) out$model[[model_names[h]]]$AnPIT_cond <- AnPIT_cond
+    }
+
   } # end h loop
 
   class(out) <- "RiskMap.spatial.cv"
   return(out)
 }
-
 
 
 ##' Simulate surface data based on a spatial model
