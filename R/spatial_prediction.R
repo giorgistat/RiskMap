@@ -2084,13 +2084,6 @@ assess_pp <- function(object,
         }
 
         prev_samples <- 1-(agg_W/(agg_W+mu_W*(1-exp(-rho_i))))^agg_W
-        ## Guard against exact 0/1 (and any non-finite fallout from agg_W/mu_W
-        ## extremes) before using prev_samples as a divisor below.
-        ## NB: pmax()/pmin() do NOT rescue NaN/NA/Inf -- any comparison
-        ## involving NaN/NA returns NA, so non-finite values must be replaced
-        ## with an explicit finite fallback *before* clamping to [1e-8, 1-1e-8].
-        prev_samples[!is.finite(prev_samples)] <- 0.5
-        prev_samples <- pmin(pmax(prev_samples, 1e-8), 1 - 1e-8)
 
         mu_C     = (rho_i * mu_W) / prev_samples
         sigma2_C =
@@ -2098,22 +2091,9 @@ assess_pp <- function(object,
           (rho_i^2 * mu_W^2 / prev_samples) * (1/agg_W + 1 - 1/prev_samples)
 
         if(refit_i$intensity_family=="negbin") {
-          ## Apply same floors as Stan's neg_binomial_2 likelihood block
-          ## (fmax(mu_C - 1, 0.1); fmax(sigma2_C - mu_C1, 1e-6); fmax(mu_C1^2/denom_nb, 1e-4)),
-          ## but first replace any non-finite values (NaN/Inf) with the floor
-          ## itself -- pmax() alone does NOT rescue NaN/Inf, it only clips
-          ## finite values that are too small.
           mu_C1    = mu_C - 1
-          mu_C1[!is.finite(mu_C1)] <- 0.1
-          mu_C1    = pmax(mu_C1, 0.1)
-
           denom_nb = sigma2_C - mu_C1
-          denom_nb[!is.finite(denom_nb)] <- 1e-6
-          denom_nb = pmax(denom_nb, 1e-6)
-
           phi_C    = mu_C1^2 / denom_nb
-          phi_C[!is.finite(phi_C)] <- 1e-4
-          phi_C    = pmax(phi_C, 1e-4)
         }
 
       } else {
@@ -2163,7 +2143,6 @@ assess_pp <- function(object,
         y_i       <- fit0$y[out_id]
       }
 
-      ## ----- NEW: per-iteration accumulators for hurdle diagnostics -----
       if (dsgm_flag) {
         obs_pos_i  <- integer(n_pred)   # observed 1(Y > 0)
         pred_pos_i <- numeric(n_pred)   # predicted P(Y > 0)
@@ -2191,7 +2170,7 @@ assess_pp <- function(object,
             support <- 0:max(max(y_samp), y_i[j], stats::qpois(0.999, mean(lambda)))
           } else if(fam == "intprev") {
             if(refit_i$intensity_family=="negbin") {
-              ## ----- FIXED: proper Bernoulli gate + aligned shifted-NB draws -----
+
               y_samp <- integer(n_draw)
               y_ind  <- stats::rbinom(n_draw, size = 1, prob = prev_samples[j, ])
               pos    <- which(y_ind == 1)
@@ -2202,11 +2181,13 @@ assess_pp <- function(object,
                   theta = phi_C[j, pos]
                 ) + 1
               }
-              # y_samp[y_ind == 0] stays 0 -> structural zeros retained
+
+              size_j <- mean(phi_C[j, ])
+              mu_j   <- mean(mu_C1[j, ])
+              if (!is.finite(size_j) || size_j <= 0) size_j <- 1e-4
+              if (!is.finite(mu_j)   || mu_j   <= 0) mu_j   <- 0.1
               support <- 0:max(max(y_samp), y_i[j],
-                               qnbinom(0.999,
-                                       size = mean(phi_C[j, ]),
-                                       mu  = mean(mu_C1[j, ])))
+                               qnbinom(0.999, size = size_j, mu = mu_j))
             }
           }
           pk <- tabulate(y_samp + 1, nbins = length(support)) / n_draw
@@ -2221,7 +2202,6 @@ assess_pp <- function(object,
           }
         }
 
-        ## ----- NEW: hurdle decomposition diagnostics -----
         if (dsgm_flag) {
           ## (1) gate: observed vs predicted positivity
           obs_pos_i[j]  <- as.integer(y_i[j] > 0)
@@ -2268,7 +2248,6 @@ assess_pp <- function(object,
       if (fam == "gaussian") out$model[[model_names[h]]]$PIT <- PIT else out$model[[model_names[h]]]$AnPIT <- AnPIT
     }
 
-    ## ----- NEW: write hurdle decomposition diagnostics to output -----
     if (dsgm_flag) {
       out$model[[model_names[h]]]$pos_cal <- pos_cal
       if (get_AnPIT) out$model[[model_names[h]]]$AnPIT_cond <- AnPIT_cond
